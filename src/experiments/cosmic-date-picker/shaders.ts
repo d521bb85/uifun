@@ -385,14 +385,15 @@ varying vec3 vNormal;
 varying vec3 vViewDir;
 
 void main() {
-  vec2 uv1 = vec2(fract(vUv.x + uTime * 0.004), vUv.y);
-  vec2 uv2 = vec2(fract(vUv.x - uTime * 0.0025 + 0.37), clamp(vUv.y + sin(uTime * 0.08) * 0.004, 0.001, 0.999));
+  vec2 uv1 = vec2(fract(vUv.x + uTime * 0.0045), vUv.y);
+  vec2 uv2 = vec2(fract(vUv.x - uTime * 0.0028 + 0.37), clamp(vUv.y + sin(uTime * 0.09) * 0.004, 0.001, 0.999));
   vec3 tex = texture2D(uSunMap, uv1).rgb * 0.65 + texture2D(uSunMap, uv2).rgb * 0.35;
 
   float ndv = max(dot(normalize(vNormal), normalize(vViewDir)), 0.0);
   float limbDarkening = pow(ndv, 0.36);
-  vec3 coreCol = vec3(2.2, 1.92, 1.48);
-  vec3 limbCol = vec3(1.35, 0.62, 0.18);
+  float pulse = 1.0 + 0.065 * sin(uTime * 0.62) + 0.032 * sin(uTime * 1.17 + 1.4);
+  vec3 coreCol = vec3(2.2, 1.92, 1.48) * pulse;
+  vec3 limbCol = vec3(1.35, 0.62, 0.18) * (0.94 + 0.09 * pulse);
 
   vec3 color = mix(limbCol, coreCol, limbDarkening) * (0.78 + 0.48 * tex);
   gl_FragColor = vec4(color, uOpacity);
@@ -419,16 +420,19 @@ void main() {
   float r = length(p);
   if (r > 1.0) discard;
 
-  float core = exp(-r * 8.5) * 2.1;
-  float innerHalo = exp(-r * 3.4) * 0.72;
-  float midHalo = exp(-r * 1.9) * 0.24;
-  float outerHalo = pow(max(1.0 - r, 0.0), 2.8) * 0.18;
+  float breathe = 1.0 + 0.13 * sin(uTime * 0.62) + 0.065 * sin(uTime * 1.17 + 1.4);
+  float rScaled = r / (0.96 + 0.06 * breathe);
+
+  float core = exp(-rScaled * 8.4) * 2.1 * (0.94 + 0.08 * breathe);
+  float innerHalo = exp(-rScaled * 3.35) * 0.74 * breathe;
+  float midHalo = exp(-rScaled * 1.85) * 0.26 * breathe;
+  float outerHalo = pow(max(1.0 - rScaled, 0.0), 2.75) * 0.2 * breathe;
 
   // Delicate optical horizontal flare streak
-  float streak = exp(-abs(p.y) * 28.0) * exp(-abs(p.x) * 2.2) * 0.22;
+  float streak = exp(-abs(p.y) * 28.0) * exp(-abs(p.x) * 2.15) * 0.24 * breathe;
 
   float angle = atan(p.y, p.x);
-  float rays = 0.92 + 0.08 * sin(angle * 7.0 + uTime * 0.22) * sin(angle * 11.0 - uTime * 0.16);
+  float rays = 0.9 + 0.1 * sin(angle * 7.0 + uTime * 0.24) * sin(angle * 11.0 - uTime * 0.17);
 
   vec3 col =
     vec3(1.0, 0.97, 0.9) * core +
@@ -456,8 +460,46 @@ varying float vTwinkle;
 
 void main() {
   vColor = aColor;
-  vTwinkle = 0.88 + 0.12 * sin(uTime * 1.1 + aPhase);
+  float speed = 0.85 + fract(aPhase * 0.37) * 1.65;
+  float shimmer = 0.62 * sin(uTime * speed + aPhase) + 0.38 * sin(uTime * speed * 1.73 + aPhase * 2.1);
+  vTwinkle = 0.82 + 0.26 * shimmer;
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+  gl_PointSize = clamp(aSize * uPixelRatio * uSizeScale * (18.0 / max(-mvPosition.z, 1.0)), 1.0, 9.0);
+  gl_Position = projectionMatrix * mvPosition;
+}
+`;
+
+export const galacticStreamVertexShader = /* glsl */ `
+attribute float aSize;
+attribute vec3 aColor;
+attribute float aPhase;
+
+uniform float uPixelRatio;
+uniform float uTime;
+uniform float uSizeScale;
+uniform float uDrift;
+
+varying vec3 vColor;
+varying float vTwinkle;
+
+void main() {
+  // Wrap each star seamlessly along the [-23, 23] Orion Spur axis so scrubbing years never snaps
+  float span = 46.0;
+  float along = mod(position.x - uDrift + span * 0.5, span) - span * 0.5;
+  float edgeFade = smoothstep(23.0, 17.5, abs(along));
+
+  vec3 pos = vec3(
+    along,
+    along * 0.34 + position.y,
+    position.z + sin(along * 0.14) * 2.2
+  );
+
+  vColor = aColor;
+  float speed = 0.9 + fract(aPhase * 0.43) * 1.8;
+  float shimmer = 0.6 * sin(uTime * speed + aPhase) + 0.4 * sin(uTime * speed * 1.61 + aPhase * 1.9);
+  vTwinkle = (0.8 + 0.28 * shimmer) * edgeFade;
+
+  vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
   gl_PointSize = clamp(aSize * uPixelRatio * uSizeScale * (18.0 / max(-mvPosition.z, 1.0)), 1.0, 9.0);
   gl_Position = projectionMatrix * mvPosition;
 }

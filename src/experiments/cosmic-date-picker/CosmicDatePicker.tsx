@@ -6,6 +6,7 @@ import {
   type ComponentProps,
   type FocusEvent,
   type PointerEvent,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -18,11 +19,11 @@ import { type CosmicFocusMode, CosmicSceneRenderer } from "./CosmicScene";
 
 type EditableDateUnit = "year" | "month" | "day";
 
-const DRAG_THRESHOLD_PX = 6;
+const DRAG_THRESHOLD_PX = 5;
 const STEP_PX_BY_UNIT: Record<EditableDateUnit, number> = {
-  year: 20,
-  month: 26,
-  day: 16,
+  year: 11,
+  month: 15,
+  day: 9,
 };
 
 function isEditableUnit(type: string | null | undefined): type is EditableDateUnit {
@@ -210,6 +211,44 @@ export function CosmicDatePicker({
     setFocusMode("idle");
   };
 
+  const endActiveDrag = useCallback(() => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    if (drag.active && cardRef.current) {
+      try {
+        if (cardRef.current.hasPointerCapture?.(drag.pointerId)) {
+          cardRef.current.releasePointerCapture(drag.pointerId);
+        }
+      } catch {
+        // Capture may already have been dropped when crossing an iframe boundary.
+      }
+      setDragging(false);
+    }
+    dragRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    const handleGlobalRelease = () => {
+      if (dragRef.current) {
+        endActiveDrag();
+      }
+    };
+
+    window.addEventListener("pointerup", handleGlobalRelease, true);
+    window.addEventListener("pointercancel", handleGlobalRelease, true);
+    window.addEventListener("mouseup", handleGlobalRelease, true);
+    window.addEventListener("blur", handleGlobalRelease);
+    document.addEventListener("visibilitychange", handleGlobalRelease);
+
+    return () => {
+      window.removeEventListener("pointerup", handleGlobalRelease, true);
+      window.removeEventListener("pointercancel", handleGlobalRelease, true);
+      window.removeEventListener("mouseup", handleGlobalRelease, true);
+      window.removeEventListener("blur", handleGlobalRelease);
+      document.removeEventListener("visibilitychange", handleGlobalRelease);
+    };
+  }, [endActiveDrag]);
+
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
     if (disabled || event.button !== 0) return;
 
@@ -249,12 +288,22 @@ export function CosmicDatePicker({
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
 
+    // Catch releases that happened outside an iframe or browser window
+    if (event.pointerType === "mouse" && (event.buttons & 1) === 0) {
+      endActiveDrag();
+      return;
+    }
+
     const dx = event.clientX - drag.startX;
     if (!drag.active) {
       if (Math.abs(dx) < DRAG_THRESHOLD_PX) return;
       drag.active = true;
       setDragging(true);
-      event.currentTarget.setPointerCapture?.(event.pointerId);
+      try {
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+      } catch {
+        // Ignore if capture is disallowed in the current browsing context.
+      }
       if (focusModeRef.current !== drag.unit) {
         wasFocusedInsideRef.current = true;
         setFocusMode(drag.unit);
@@ -277,11 +326,7 @@ export function CosmicDatePicker({
   const finishDrag = (event: PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    if (drag.active) {
-      event.currentTarget.releasePointerCapture?.(event.pointerId);
-      setDragging(false);
-    }
-    dragRef.current = null;
+    endActiveDrag();
   };
 
   return (
@@ -297,6 +342,7 @@ export function CosmicDatePicker({
       onPointerMove={handlePointerMove}
       onPointerUp={finishDrag}
       onPointerCancel={finishDrag}
+      onLostPointerCapture={finishDrag}
     >
       <canvas ref={canvasRef} className={styles.canvas} />
       <div className={styles.scrim} aria-hidden="true" />

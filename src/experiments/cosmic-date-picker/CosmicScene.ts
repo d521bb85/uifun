@@ -7,6 +7,7 @@ import {
   cloudsVertexShader,
   earthFragmentShader,
   earthVertexShader,
+  galacticStreamVertexShader,
   moonFragmentShader,
   moonVertexShader,
   oceanFragmentShader,
@@ -70,6 +71,7 @@ export class CosmicSceneRenderer {
     uTime: { value: number };
     uSizeScale: { value: number };
     uOpacity: { value: number };
+    uDrift: { value: number };
   };
 
   private readonly sunGroup: THREE.Group;
@@ -515,13 +517,10 @@ export class CosmicSceneRenderer {
       const spread = (rand() - 0.5) * (rand() - 0.5) * 18;
       const thickness = (rand() - 0.5) * (rand() - 0.5) * 6.5;
 
-      const x = along;
-      const y = along * 0.34 + thickness;
-      const z = -6.5 + spread + Math.sin(along * 0.14) * 2.2;
-
-      positions[i * 3] = x;
-      positions[i * 3 + 1] = y;
-      positions[i * 3 + 2] = z;
+      // Store local offsets; galacticStreamVertexShader wraps along X seamlessly
+      positions[i * 3] = along;
+      positions[i * 3 + 1] = thickness;
+      positions[i * 3 + 2] = -6.5 + spread;
 
       const warmCore = Math.exp(-((along + 3) * (along + 3)) / 140);
       const tint = rand();
@@ -549,10 +548,11 @@ export class CosmicSceneRenderer {
       uTime: { value: 0 },
       uSizeScale: { value: 1.15 },
       uOpacity: { value: 0 },
+      uDrift: { value: 0 },
     };
 
     const material = new THREE.ShaderMaterial({
-      vertexShader: starfieldVertexShader,
+      vertexShader: galacticStreamVertexShader,
       fragmentShader: starfieldFragmentShader,
       uniforms,
       transparent: true,
@@ -679,9 +679,10 @@ export class CosmicSceneRenderer {
       this.tmpSunDir.lerp(this.tmpVec, 0.35).normalize();
     }
 
+    const ambientTime = this.reducedMotion ? 0 : this.elapsed;
     const galPhase = this.smoothEpochYears * 0.042;
-    const sunArcX = Math.sin(galPhase * 0.45) * 1.45;
-    const sunArcY = Math.sin(galPhase * 0.45) * 0.48;
+    const sunArcX = Math.sin(galPhase * 0.45) * 1.45 + Math.sin(ambientTime * 0.14) * 0.06;
+    const sunArcY = Math.sin(galPhase * 0.45) * 0.48 + Math.cos(ambientTime * 0.11) * 0.035;
     const sunArcZ = Math.cos(galPhase * 0.45) * 0.35 - 0.35;
 
     if (this.mode === "year") {
@@ -690,9 +691,7 @@ export class CosmicSceneRenderer {
         damp(this.sunGroup.position.y, sunArcY, 6, dt || 0.016),
         damp(this.sunGroup.position.z, sunArcZ, 6, dt || 0.016),
       );
-      const driftX = -((this.smoothEpochYears * 0.24) % 14);
-      const driftY = driftX * 0.34;
-      this.galacticDustGroup.position.set(driftX, driftY, 0);
+      this.galacticDustUniforms.uDrift.value = this.smoothEpochYears * 0.36 + ambientTime * 0.085;
     } else {
       this.sunGroup.position.set(
         damp(this.sunGroup.position.x, 0, 6, dt || 0.016),
@@ -714,7 +713,10 @@ export class CosmicSceneRenderer {
     this.moonMesh.rotation.y = -Math.PI * 0.5 + this.cosmicState.lunar.librationLonRad;
     this.moonMesh.rotation.x = this.cosmicState.lunar.librationLatRad;
 
-    const galLonShift = this.mode === "year" ? this.smoothEpochYears * 0.0085 : 0;
+    const galLonShift =
+      this.mode === "year"
+        ? this.smoothEpochYears * 0.0085 + ambientTime * 0.0022
+        : ambientTime * 0.001;
     this.skyGroup.rotation.y = this.smoothPrecession + galLonShift;
   }
 
@@ -729,12 +731,15 @@ export class CosmicSceneRenderer {
     const radialOutZ = -Math.sin(this.smoothOrbitAngle);
     const tangentX = -Math.sin(this.smoothOrbitAngle);
     const tangentZ = -Math.cos(this.smoothOrbitAngle);
+    const t = this.reducedMotion ? 0 : this.elapsed;
+    const swayX = Math.sin(t * 0.16) * 0.065;
+    const swayY = Math.cos(t * 0.13) * 0.04;
 
     if (mode === "idle") {
       const dist = 3.45;
       outPos.set(
-        ex - radialOutX * dist * 0.22 + tangentX * dist * 0.96,
-        0.62,
+        ex - radialOutX * dist * 0.22 + tangentX * dist * 0.96 + swayX * 0.7,
+        0.62 + swayY * 0.7,
         ez - radialOutZ * dist * 0.22 + tangentZ * dist * 0.96,
       );
       outTarget.set(ex + radialOutX * 0.08, -0.04, ez + radialOutZ * 0.08);
@@ -744,8 +749,8 @@ export class CosmicSceneRenderer {
     if (mode === "month") {
       const dist = 4.95;
       outPos.set(
-        ex + radialOutX * dist * 0.44 + tangentX * dist * 0.9,
-        1.55,
+        ex + radialOutX * dist * 0.44 + tangentX * dist * 0.9 + swayX * 0.85,
+        1.55 + swayY * 0.85,
         ez + radialOutZ * dist * 0.44 + tangentZ * dist * 0.9,
       );
       outTarget.set(ex * 0.54, 0.02, ez * 0.54);
@@ -754,13 +759,13 @@ export class CosmicSceneRenderer {
 
     if (mode === "year") {
       const epochDrift = Math.sin(this.smoothEpochYears * 0.019) * 0.45;
-      outPos.set(epochDrift * 0.6, 0.25 + epochDrift * 0.12, 8.6);
+      outPos.set(epochDrift * 0.6 + swayX * 1.4, 0.25 + epochDrift * 0.12 + swayY * 1.2, 8.6);
       outTarget.set(this.sunGroup.position.x * 0.42, this.sunGroup.position.y * 0.3, -1.2);
       return;
     }
 
     const stageY = this.dayStageGroup.position.y;
-    outPos.set(0, stageY + 0.16, 3.85);
+    outPos.set(swayX * 0.55, stageY + 0.16 + swayY * 0.45, 3.85);
     outTarget.set(0.05, stageY + 0.08, -0.8);
   }
 
