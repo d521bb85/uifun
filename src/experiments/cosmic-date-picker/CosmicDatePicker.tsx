@@ -5,6 +5,7 @@ import { Field, FieldLabel } from "@ui-sdk/react/field";
 import {
   type ComponentProps,
   type FocusEvent,
+  type MouseEvent,
   type PointerEvent,
   useCallback,
   useEffect,
@@ -61,12 +62,12 @@ export function CosmicDatePicker({
 }: CosmicDatePickerProps) {
   const stageActive = useStageActive();
   const [controller] = useState(createDateInputController);
-  const [initialDefault] = useState(() => defaultValue ?? getTodayIsoDate());
+  const [initialDefault] = useState<string | undefined>(() => defaultValue);
   const isControlled = value !== undefined;
 
   const [lastValidIso, setLastValidIso] = useState<string>(() => {
     if (isControlled && value && parseIsoDate(value)) return value;
-    if (parseIsoDate(initialDefault)) return initialDefault;
+    if (initialDefault && parseIsoDate(initialDefault)) return initialDefault;
     return getTodayIsoDate();
   });
 
@@ -77,8 +78,6 @@ export function CosmicDatePicker({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const rendererRef = useRef<CosmicSceneRenderer | null>(null);
 
-  const wasFocusedInsideRef = useRef(false);
-  const pointerTargetUnitRef = useRef<EditableDateUnit | null>(null);
   const focusModeRef = useRef<CosmicFocusMode>("idle");
   const lastValidIsoRef = useRef(lastValidIso);
 
@@ -172,30 +171,17 @@ export function CosmicDatePicker({
     onValueChange?.(next, details);
   };
 
+  const getFirstEditableUnit = (): EditableDateUnit => {
+    const first = cardRef.current?.querySelector<HTMLElement>(
+      '[data-slot="date-input-segment"]:not([data-type="literal"])',
+    )?.dataset.type;
+    return isEditableUnit(first) ? first : "month";
+  };
+
   const handleFocusCapture = (event: FocusEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null;
     const segmentEl = target?.closest<HTMLElement>('[data-slot="date-input-segment"]');
     const unit = segmentEl?.dataset.type;
-
-    if (!wasFocusedInsideRef.current) {
-      wasFocusedInsideRef.current = true;
-      const clickedUnit = pointerTargetUnitRef.current;
-      pointerTargetUnitRef.current = null;
-
-      if (clickedUnit) {
-        setFocusMode(clickedUnit);
-        return;
-      }
-
-      if (unit !== "year") {
-        setFocusMode("year");
-        controller.focus("year");
-        return;
-      }
-    } else {
-      pointerTargetUnitRef.current = null;
-    }
-
     if (isEditableUnit(unit)) {
       setFocusMode(unit);
     }
@@ -206,8 +192,6 @@ export function CosmicDatePicker({
     if (nextFocused && cardRef.current?.contains(nextFocused)) {
       return;
     }
-    wasFocusedInsideRef.current = false;
-    pointerTargetUnitRef.current = null;
     setFocusMode("idle");
   };
 
@@ -253,23 +237,30 @@ export function CosmicDatePicker({
     if (disabled || event.button !== 0) return;
 
     const target = event.target as HTMLElement | null;
+    const isLabel = Boolean(target?.closest('[data-slot="field-label"]'));
+    if (isLabel) {
+      if (isFocusedInside()) {
+        event.preventDefault();
+      }
+      return;
+    }
+
+    const isDateInput = Boolean(target?.closest('[data-slot="date-input"]'));
     const segmentEl = target?.closest<HTMLElement>('[data-slot="date-input-segment"]');
     const clickedType = segmentEl?.dataset.type;
     const clickedUnit = isEditableUnit(clickedType) ? clickedType : null;
-    pointerTargetUnitRef.current = clickedUnit;
+
+    if (isDateInput && !clickedUnit) return;
 
     const activeUnit: EditableDateUnit =
-      clickedUnit ?? (focusModeRef.current === "idle" ? "year" : focusModeRef.current);
+      clickedUnit ??
+      (focusModeRef.current === "idle" ? getFirstEditableUnit() : focusModeRef.current);
 
-    if (!clickedUnit) {
-      // Prevent default on background so pointerdown doesn't blur before we focus year
-      const isLabel = Boolean(target?.closest('[data-slot="field-label"]'));
-      if (!isLabel) {
-        event.preventDefault();
-        wasFocusedInsideRef.current = true;
-        setFocusMode(activeUnit);
-        controller.focus(activeUnit);
-      }
+    if (!isDateInput) {
+      // Keep pointerdown on the card background from blurring the active segment.
+      event.preventDefault();
+      setFocusMode(activeUnit);
+      controller.focus(activeUnit);
     }
 
     if (readOnly) return;
@@ -305,7 +296,6 @@ export function CosmicDatePicker({
         // Ignore if capture is disallowed in the current browsing context.
       }
       if (focusModeRef.current !== drag.unit) {
-        wasFocusedInsideRef.current = true;
         setFocusMode(drag.unit);
         controller.focus(drag.unit);
       }
@@ -320,6 +310,24 @@ export function CosmicDatePicker({
     controller.setValue(nextIso);
     if (parseIsoDate(nextIso)) {
       setLastValidIso(nextIso);
+    }
+  };
+
+  const isFocusedInside = () =>
+    Boolean(document.activeElement && cardRef.current?.contains(document.activeElement));
+
+  const handleLabelMouseDown = (event: MouseEvent<HTMLLabelElement>) => {
+    if (disabled || event.button !== 0) return;
+    if (isFocusedInside()) {
+      // Prevent mousedown on the non-focusable label from blurring the active segment.
+      event.preventDefault();
+    }
+  };
+
+  const handleLabelClick = (event: MouseEvent<HTMLLabelElement>) => {
+    if (disabled) return;
+    if (isFocusedInside()) {
+      event.preventDefault();
     }
   };
 
@@ -346,7 +354,13 @@ export function CosmicDatePicker({
     >
       <canvas ref={canvasRef} className={styles.canvas} />
       <div className={styles.scrim} aria-hidden="true" />
-      <FieldLabel className={styles.label}>{label}</FieldLabel>
+      <FieldLabel
+        className={styles.label}
+        onMouseDown={handleLabelMouseDown}
+        onClick={handleLabelClick}
+      >
+        {label}
+      </FieldLabel>
       <DateInput
         className={styles.dateInput}
         controller={controller}
