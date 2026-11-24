@@ -1,0 +1,16 @@
+pre-commit:
+  piped: true
+  jobs:
+    - name: biome
+      run: ./node_modules/.bin/biome check --write --no-errors-on-unmatched --files-ignore-unknown=true {staged_files}
+      stage_fixed: true
+    - name: verify
+      group:
+        parallel: true
+        jobs:
+          - name: typecheck
+            run: ./node_modules/.bin/tsc --noEmit
+          - name: test
+            run: ./node_modules/.bin/vitest run --passWithNoTests
+          - name: build
+            run: ./node_modules/.bin/vite build

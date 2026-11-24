@@ -1,0 +1,38 @@
+# Every push to main and every pull request is checked and built.
+# Nothing is deployed from here: releases are made by hand (see README, section Releasing).
+name: Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      # Uses the pnpm version from "packageManager" in package.json.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Check (type-check + lint)
+        run: pnpm run check
+
+      - name: Test
+        run: pnpm run test
+
+      - name: Build
+        run: pnpm run build
