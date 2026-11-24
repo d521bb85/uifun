@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { ExperimentStage } from "@/components/stage/ExperimentStage";
 import type { ExperimentEntry } from "@/lib/registry";
 import { EmptyFeed } from "./EmptyFeed";
@@ -14,11 +14,11 @@ function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 export function FeedList({ items }: FeedListProps) {
-  const [focusedIndex, setFocusedIndex] = useState<number | null>(null);
-  const cardRefs = useRef<Map<string, HTMLElement>>(new Map());
+  const activeIndexRef = useRef<number | null>(null);
+  const stageRefs = useRef<Map<string, HTMLElement>>(new Map());
 
   useEffect(() => {
-    if (items.length === 0) return;
+    if (items.length <= 1) return;
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
@@ -27,25 +27,24 @@ export function FeedList({ items }: FeedListProps) {
       if (event.key !== "j" && event.key !== "k") return;
 
       event.preventDefault();
-      setFocusedIndex((prev) => {
-        const next =
-          event.key === "j"
-            ? prev === null
-              ? 0
-              : Math.min(prev + 1, items.length - 1)
-            : prev === null
-              ? items.length - 1
-              : Math.max(prev - 1, 0);
+      const prev = activeIndexRef.current;
+      const next =
+        event.key === "j"
+          ? prev === null
+            ? 0
+            : Math.min(prev + 1, items.length - 1)
+          : prev === null
+            ? items.length - 1
+            : Math.max(prev - 1, 0);
 
-        const targetItem = items[next];
-        if (targetItem) {
-          cardRefs.current.get(targetItem.slug)?.scrollIntoView({
-            behavior: "smooth",
-            block: "center",
-          });
-        }
-        return next;
-      });
+      activeIndexRef.current = next;
+      const targetItem = items[next];
+      if (targetItem) {
+        stageRefs.current.get(targetItem.slug)?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+      }
     };
 
     window.addEventListener("keydown", onKeyDown);
@@ -57,17 +56,16 @@ export function FeedList({ items }: FeedListProps) {
   }
 
   return (
-    <div className="flex flex-col gap-8">
-      {items.map((experiment, index) => (
+    <div className="w-full">
+      {items.map((experiment) => (
         <ExperimentStage
           key={experiment.slug}
           experiment={experiment}
-          focused={focusedIndex === index}
           stageRef={(node) => {
             if (node) {
-              cardRefs.current.set(experiment.slug, node);
+              stageRefs.current.set(experiment.slug, node);
             } else {
-              cardRefs.current.delete(experiment.slug);
+              stageRefs.current.delete(experiment.slug);
             }
           }}
         />
