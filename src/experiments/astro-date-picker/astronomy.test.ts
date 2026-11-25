@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import {
   addDateSegment,
-  computeCosmicState,
+  computeAstroState,
   computeLunarDirectionEcliptic,
   computeLunarSunDirectionObserver,
   computeSunDirectionEcliptic,
@@ -22,16 +22,16 @@ function dot3(a: readonly [number, number, number], b: readonly [number, number,
   return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
 
-describe("cosmic astronomy engine", () => {
+describe("astro astronomy engine", () => {
   it("computes exact J2000.0 Julian Day", () => {
     expect(toJulianDay(2000, 1, 1, 12)).toBeCloseTo(2451545.0, 6);
   });
 
   it("calculates accurate seasonal solar declination at solstices and equinoxes", () => {
-    const marchEquinox = computeCosmicState("2026-03-20");
-    const juneSolstice = computeCosmicState("2026-06-21");
-    const septEquinox = computeCosmicState("2026-09-23");
-    const decSolstice = computeCosmicState("2026-12-21");
+    const marchEquinox = computeAstroState("2026-03-20");
+    const juneSolstice = computeAstroState("2026-06-21");
+    const septEquinox = computeAstroState("2026-09-23");
+    const decSolstice = computeAstroState("2026-12-21");
 
     expect(Math.abs(marchEquinox.solar.sunDeclinationRad * RAD2DEG)).toBeLessThan(0.6);
     expect(juneSolstice.solar.sunDeclinationRad * RAD2DEG).toBeCloseTo(23.44, 1);
@@ -40,8 +40,8 @@ describe("cosmic astronomy engine", () => {
   });
 
   it("models Earth's eccentric orbit with perihelion in January and aphelion in July", () => {
-    const perihelion = computeCosmicState("2026-01-03");
-    const aphelion = computeCosmicState("2026-07-06");
+    const perihelion = computeAstroState("2026-01-03");
+    const aphelion = computeAstroState("2026-07-06");
 
     expect(perihelion.solar.earthSunDistanceAU).toBeCloseTo(0.9833, 3);
     expect(aphelion.solar.earthSunDistanceAU).toBeCloseTo(1.0167, 3);
@@ -49,9 +49,9 @@ describe("cosmic astronomy engine", () => {
   });
 
   it("computes accurate lunar phases and spring vs neap tidal potentials", () => {
-    const newMoon = computeCosmicState("2026-11-09");
-    const firstQuarter = computeCosmicState("2026-11-17");
-    const fullMoon = computeCosmicState("2026-11-24");
+    const newMoon = computeAstroState("2026-11-09");
+    const firstQuarter = computeAstroState("2026-11-17");
+    const fullMoon = computeAstroState("2026-11-24");
 
     expect(newMoon.lunar.illumination).toBeLessThan(0.05);
     expect(firstQuarter.lunar.illumination).toBeGreaterThan(0.4);
@@ -68,9 +68,9 @@ describe("cosmic astronomy engine", () => {
   });
 
   it("advances galactic epoch and axial precession monotonically across years", () => {
-    const y1950 = computeCosmicState("1950-06-15");
-    const y2000 = computeCosmicState("2000-06-15");
-    const y2050 = computeCosmicState("2050-06-15");
+    const y1950 = computeAstroState("1950-06-15");
+    const y2000 = computeAstroState("2000-06-15");
+    const y2050 = computeAstroState("2050-06-15");
 
     expect(y1950.galactic.epochYearsSinceJ2000).toBeLessThan(y2000.galactic.epochYearsSinceJ2000);
     expect(y2050.galactic.epochYearsSinceJ2000).toBeGreaterThan(
@@ -100,7 +100,7 @@ describe("cosmic astronomy engine", () => {
   it("aligns Earth's 3D subsolar point and polar seasons accurately with the heliocentric Sun direction", () => {
     const seasonalDates = ["2026-03-20", "2026-06-21", "2026-09-23", "2026-12-21"];
     for (const iso of seasonalDates) {
-      const { solar } = computeCosmicState(iso);
+      const { solar } = computeAstroState(iso);
       const sunDir = computeSunDirectionEcliptic(solar);
       const subsolarNormal = geographicToEclipticNormal(
         solar.subsolarLatRad,
@@ -111,9 +111,9 @@ describe("cosmic astronomy engine", () => {
       expect(dot3(subsolarNormal, sunDir)).toBeGreaterThan(0.9999);
     }
 
-    const june = computeCosmicState("2026-06-21").solar;
-    const dec = computeCosmicState("2026-12-21").solar;
-    const march = computeCosmicState("2026-03-20").solar;
+    const june = computeAstroState("2026-06-21").solar;
+    const dec = computeAstroState("2026-12-21").solar;
+    const march = computeAstroState("2026-03-20").solar;
 
     const northPoleJune = geographicToEclipticNormal(
       Math.PI / 2,
@@ -162,9 +162,9 @@ describe("cosmic astronomy engine", () => {
   });
 
   it("places the 3D geocentric Moon direction accurately relative to the Sun across lunar phases", () => {
-    const newMoon = computeCosmicState("2026-11-09");
-    const firstQuarter = computeCosmicState("2026-11-17");
-    const fullMoon = computeCosmicState("2026-11-24");
+    const newMoon = computeAstroState("2026-11-09");
+    const firstQuarter = computeAstroState("2026-11-17");
+    const fullMoon = computeAstroState("2026-11-24");
 
     const newMoonDot = dot3(
       computeLunarDirectionEcliptic(newMoon.lunar),
@@ -188,11 +188,11 @@ describe("cosmic astronomy engine", () => {
     // 2026-11-24: Moon is ~5° north of ecliptic -> Earth sees ~6.5° south (including Cassini 1.54° tilt)
     // 2026-11-09: Moon is ~5° south of ecliptic -> Earth sees ~6.5° north
     for (const iso of ["2026-11-09", "2026-11-17", "2026-11-24"]) {
-      const { lunar } = computeCosmicState(iso);
+      const { lunar } = computeAstroState(iso);
       const moonPos = new THREE.Vector3(...computeLunarDirectionEcliptic(lunar));
       const dirToEarth = moonPos.clone().negate().normalize();
 
-      // 3D Orbital Moon transform (matching CosmicScene.ts)
+      // 3D Orbital Moon transform (matching AstroScene.ts)
       const orbMesh = new THREE.Mesh();
       orbMesh.rotation.order = "YXZ";
       orbMesh.rotation.set(
@@ -205,7 +205,7 @@ describe("cosmic astronomy engine", () => {
       const orbSubLat = Math.asin(Math.max(-1, Math.min(1, earthInOrb.y)));
       const orbSubLon = Math.atan2(-earthInOrb.z, earthInOrb.x);
 
-      // Day Mode Moon transform (matching CosmicScene.ts, observer along +Z)
+      // Day Mode Moon transform (matching AstroScene.ts, observer along +Z)
       const dayMesh = new THREE.Mesh();
       dayMesh.rotation.set(lunar.librationLatRad, -Math.PI * 0.5 - lunar.librationLonRad, 0);
       dayMesh.updateMatrixWorld(true);
@@ -221,8 +221,8 @@ describe("cosmic astronomy engine", () => {
       expect(daySubLon * RAD2DEG).toBeCloseTo(lunar.librationLonRad * RAD2DEG, 2);
     }
 
-    const northMoon = computeCosmicState("2026-11-24").lunar;
-    const southMoon = computeCosmicState("2026-11-09").lunar;
+    const northMoon = computeAstroState("2026-11-24").lunar;
+    const southMoon = computeAstroState("2026-11-09").lunar;
     expect(northMoon.latitudeRad * RAD2DEG).toBeGreaterThan(4.5);
     expect(northMoon.librationLatRad * RAD2DEG).toBeLessThan(-6.0);
     expect(southMoon.latitudeRad * RAD2DEG).toBeLessThan(-4.5);

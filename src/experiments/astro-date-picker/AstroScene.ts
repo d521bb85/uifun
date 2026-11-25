@@ -1,8 +1,8 @@
 import * as THREE from "three";
 import {
+  type AstroState,
   addDateSegment,
-  type CosmicState,
-  computeCosmicState,
+  computeAstroState,
   computeLunarSunDirectionObserver,
   GALACTIC_ECLIPTIC_BASIS,
   galacticToEclipticDirection,
@@ -39,9 +39,9 @@ import {
 } from "./shaders";
 import { BRIGHT_STARS, bvToRgb } from "./starCatalog";
 
-export type CosmicFocusMode = "idle" | "year" | "month" | "day";
+export type AstroFocusMode = "idle" | "year" | "month" | "day";
 
-const TEXTURE_BASE = "/textures/cosmic";
+const TEXTURE_BASE = "/textures/astro";
 const EARTH_ORBIT_RADIUS = 6.2;
 const MEAN_LUNAR_DISTANCE_KM = 384400;
 const MOON_PHYSICAL_RADIUS = 0.2725;
@@ -121,8 +121,8 @@ interface ModeVisualTargets {
 
 interface CameraFlight {
   active: boolean;
-  fromMode: CosmicFocusMode;
-  toMode: CosmicFocusMode;
+  fromMode: AstroFocusMode;
+  toMode: AstroFocusMode;
   space: FlightSpace;
   elapsed: number;
   duration: number;
@@ -159,7 +159,7 @@ interface CameraFlight {
   startStarHorizonClip: number;
 }
 
-function getModeVisualTargets(mode: CosmicFocusMode): ModeVisualTargets {
+function getModeVisualTargets(mode: AstroFocusMode): ModeVisualTargets {
   return {
     wEarth: mode === "idle" || mode === "month" ? 1 : 0,
     wOrbitalMoon: mode === "idle" || mode === "month" ? 1 : 0,
@@ -181,7 +181,7 @@ function getModeVisualTargets(mode: CosmicFocusMode): ModeVisualTargets {
 
 const FLIGHT_EASE_OUT_POWER = 1.75;
 
-function getTransitionDuration(from: CosmicFocusMode, to: CosmicFocusMode): number {
+function getTransitionDuration(from: AstroFocusMode, to: AstroFocusMode): number {
   if ((from === "idle" && to === "month") || (from === "month" && to === "idle")) return 0.94;
   if ((from === "idle" && to === "day") || (from === "day" && to === "idle")) return 1.02;
   if ((from === "idle" && to === "year") || (from === "year" && to === "idle")) return 1.04;
@@ -196,7 +196,7 @@ function smootherstep(t: number): number {
 }
 
 /**
- * Asymmetric cosmic ease-in-out curve:
+ * Asymmetric ease-in-out curve:
  * - Zero initial velocity (no frame-1 twitch), brisk acceleration into the flight
  * - Longer, velvety C² ease-out cushion at the end so the camera settles smoothly into place
  */
@@ -363,7 +363,7 @@ function advanceSmoothAngleLinear(
   return [shortestAngleDelta(0, current + step), nextVelocity];
 }
 
-function computeMoonRelAngle(state: CosmicState): number {
+function computeMoonRelAngle(state: AstroState): number {
   return shortestAngleDelta(state.solar.earthHeliocentricLongitudeRad, state.lunar.longitudeRad);
 }
 
@@ -392,7 +392,7 @@ function seededRandom(seed: number): () => number {
   };
 }
 
-export class CosmicSceneRenderer {
+export class AstroSceneRenderer {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene: THREE.Scene;
   private readonly camera: THREE.PerspectiveCamera;
@@ -536,8 +536,8 @@ export class CosmicSceneRenderer {
   private readonly geometries: THREE.BufferGeometry[] = [];
   private readonly materials: THREE.Material[] = [];
 
-  private cosmicState: CosmicState;
-  private mode: CosmicFocusMode = "idle";
+  private astroState: AstroState;
+  private mode: AstroFocusMode = "idle";
   private active = true;
   private reducedMotion = false;
   private disposed = false;
@@ -703,8 +703,8 @@ export class CosmicSceneRenderer {
     startStarHorizonClip: 0,
   };
 
-  private constructor(canvas: HTMLCanvasElement, initialState: CosmicState) {
-    this.cosmicState = initialState;
+  private constructor(canvas: HTMLCanvasElement, initialState: AstroState) {
+    this.astroState = initialState;
     this.targetOrbitAngle = initialState.solar.earthHeliocentricLongitudeRad;
     this.smoothOrbitAngle = initialState.solar.earthHeliocentricLongitudeRad;
     this.trailOrbitAngle = initialState.solar.earthHeliocentricLongitudeRad;
@@ -1083,9 +1083,9 @@ export class CosmicSceneRenderer {
     this.applyUniforms();
   }
 
-  static create(canvas: HTMLCanvasElement, initialState: CosmicState): CosmicSceneRenderer | null {
+  static create(canvas: HTMLCanvasElement, initialState: AstroState): AstroSceneRenderer | null {
     try {
-      return new CosmicSceneRenderer(canvas, initialState);
+      return new AstroSceneRenderer(canvas, initialState);
     } catch {
       return null;
     }
@@ -1167,7 +1167,7 @@ export class CosmicSceneRenderer {
       uOpacity: { value: 0.96 },
       uHorizonClip: { value: 0 },
       uMoonDir: { value: DAY_MOON_DIR.clone() },
-      uMoonIllum: { value: this.cosmicState.lunar.illumination },
+      uMoonIllum: { value: this.astroState.lunar.illumination },
     };
 
     const material = new THREE.ShaderMaterial({
@@ -1519,12 +1519,12 @@ export class CosmicSceneRenderer {
   }
 
   private updateMonthNeighbors() {
-    const cur = this.cosmicState;
+    const cur = this.astroState;
     this.nextMonthIso = addDateSegment(cur.isoDate, "month", 1);
     this.prevMonthIso = addDateSegment(cur.isoDate, "month", -1);
 
-    const nextState = computeCosmicState(this.nextMonthIso);
-    const prevState = computeCosmicState(this.prevMonthIso);
+    const nextState = computeAstroState(this.nextMonthIso);
+    const prevState = computeAstroState(this.prevMonthIso);
 
     this.nextOrbitDelta = positiveAngleDelta(
       cur.solar.earthHeliocentricLongitudeRad,
@@ -1551,12 +1551,12 @@ export class CosmicSceneRenderer {
   }
 
   private updateDayNeighbors() {
-    const cur = this.cosmicState;
+    const cur = this.astroState;
     this.nextDayIso = addDateSegment(cur.isoDate, "day", 1);
     this.prevDayIso = addDateSegment(cur.isoDate, "day", -1);
 
-    const nextState = computeCosmicState(this.nextDayIso);
-    const prevState = computeCosmicState(this.prevDayIso);
+    const nextState = computeAstroState(this.nextDayIso);
+    const prevState = computeAstroState(this.prevDayIso);
 
     this.nextDayElongDelta = shortestAngleDelta(
       cur.lunar.elongationRad,
@@ -1605,12 +1605,12 @@ export class CosmicSceneRenderer {
     this.dragDayFraction = THREE.MathUtils.clamp(fraction, -1, 1);
   }
 
-  setState(next: CosmicState) {
-    if (next.isoDate === this.cosmicState.isoDate) return;
+  setState(next: AstroState) {
+    if (next.isoDate === this.astroState.isoDate) return;
 
-    const prevState = this.cosmicState;
+    const prevState = this.astroState;
     const rawDeltaDays = next.solar.julianDay - prevState.solar.julianDay;
-    this.cosmicState = next;
+    this.astroState = next;
 
     if (next.isoDate === this.nextMonthIso) {
       // Exact step forward +1 month: matches dragMonthFraction = +1.0 with zero discontinuity
@@ -1678,7 +1678,7 @@ export class CosmicSceneRenderer {
     this.yearSkyQuatWorld.multiplyQuaternions(this.tmpQuat, this.yearSkyQuat);
   }
 
-  private repositionDayStage(fromMode: CosmicFocusMode) {
+  private repositionDayStage(fromMode: AstroFocusMode) {
     if (fromMode === "idle" || fromMode === "month") {
       // Descend directly toward Earth's dark night hemisphere so entering Day feels like
       // calmly dropping from orbit through the atmosphere down onto Earth's night coastline.
@@ -1735,7 +1735,7 @@ export class CosmicSceneRenderer {
     this.sunYearWorldPos.copy(this.sunYearLocalPos).applyAxisAngle(UP_AXIS, this.yearYaw);
   }
 
-  private startFlight(fromMode: CosmicFocusMode, toMode: CosmicFocusMode) {
+  private startFlight(fromMode: AstroFocusMode, toMode: AstroFocusMode) {
     const wasFlying = this.flight.active;
     const prevFromMode = this.flight.fromMode;
     const prevProgress = wasFlying
@@ -1834,7 +1834,7 @@ export class CosmicSceneRenderer {
     f.startSunPos.copy(
       this.wSun < 0.01 && toMode === "year" ? this.sunYearWorldPos : this.sunGroup.position,
     );
-    const moonDistFactor = this.cosmicState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM;
+    const moonDistFactor = this.astroState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM;
     const destMoonOrbitRadius =
       (toMode === "month" ? CAROUSEL_MOON_ORBIT_RADIUS : HERO_MOON_ORBIT_RADIUS) * moonDistFactor;
     f.startMoonOrbitRadius =
@@ -1869,7 +1869,7 @@ export class CosmicSceneRenderer {
     f.startStarHorizonClip = this.starHorizonClip;
   }
 
-  setMode(mode: CosmicFocusMode) {
+  setMode(mode: AstroFocusMode) {
     if (this.mode === mode) return;
     const prevMode = this.mode;
     this.mode = mode;
@@ -1883,9 +1883,9 @@ export class CosmicSceneRenderer {
       this.dragDayFraction = 0;
     } else if (this.wOcean < 0.01) {
       // Entering Day mode while ocean is hidden: align immediately to the current date's tidal level
-      this.smoothTideLevel = this.cosmicState.tidal.springNeapIndex;
+      this.smoothTideLevel = this.astroState.tidal.springNeapIndex;
       this.smoothWetTideMemory = this.smoothTideLevel;
-      this.smoothSwellEnergy = this.cosmicState.tidal.swellEnergy;
+      this.smoothSwellEnergy = this.astroState.tidal.swellEnergy;
       this.tideVelocity = 0;
       this.swellVelocity = 0;
     }
@@ -1953,42 +1953,42 @@ export class CosmicSceneRenderer {
     this.dayDragging = false;
     this.dragDayFraction = 0;
 
-    this.targetOrbitAngle = this.cosmicState.solar.earthHeliocentricLongitudeRad;
+    this.targetOrbitAngle = this.astroState.solar.earthHeliocentricLongitudeRad;
     this.smoothOrbitAngle = this.targetOrbitAngle;
     this.trailOrbitAngle = this.targetOrbitAngle;
     this.camOrbitAngle = this.targetOrbitAngle;
-    this.smoothOrbitRadius = EARTH_ORBIT_RADIUS * this.cosmicState.solar.earthSunDistanceAU;
-    this.targetSpinAngle = this.cosmicState.solar.gmstRad;
+    this.smoothOrbitRadius = EARTH_ORBIT_RADIUS * this.astroState.solar.earthSunDistanceAU;
+    this.targetSpinAngle = this.astroState.solar.gmstRad;
     this.smoothSpinAngle = this.targetSpinAngle;
-    this.smoothMoonRelAngle = computeMoonRelAngle(this.cosmicState);
+    this.smoothMoonRelAngle = computeMoonRelAngle(this.astroState);
     this.moonRelVelocity = 0;
-    this.smoothMoonLat = this.cosmicState.lunar.latitudeRad;
+    this.smoothMoonLat = this.astroState.lunar.latitudeRad;
     this.smoothEarthScale = this.mode === "month" ? CAROUSEL_EARTH_SCALE : 1;
-    const moonDistFactor = this.cosmicState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM;
+    const moonDistFactor = this.astroState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM;
     this.smoothMoonOrbitRadius =
       (this.mode === "month" ? CAROUSEL_MOON_ORBIT_RADIUS : HERO_MOON_ORBIT_RADIUS) *
       moonDistFactor;
 
-    this.targetDayElong = this.cosmicState.lunar.elongationRad;
+    this.targetDayElong = this.astroState.lunar.elongationRad;
     this.smoothMoonElong = this.targetDayElong;
-    this.targetDayAge = this.cosmicState.lunar.synodicAgeDays;
+    this.targetDayAge = this.astroState.lunar.synodicAgeDays;
     this.smoothDayAge = this.targetDayAge;
-    this.smoothDayLat = this.cosmicState.lunar.latitudeRad;
-    this.smoothDayLibLon = this.cosmicState.lunar.librationLonRad;
-    this.smoothDayLibLat = this.cosmicState.lunar.librationLatRad;
-    this.smoothMoonIllum = this.cosmicState.lunar.illumination;
-    this.smoothMoonEarthshine = this.cosmicState.lunar.earthshine;
-    this.smoothMoonScale = this.cosmicState.lunar.apparentScale;
+    this.smoothDayLat = this.astroState.lunar.latitudeRad;
+    this.smoothDayLibLon = this.astroState.lunar.librationLonRad;
+    this.smoothDayLibLat = this.astroState.lunar.librationLatRad;
+    this.smoothMoonIllum = this.astroState.lunar.illumination;
+    this.smoothMoonEarthshine = this.astroState.lunar.earthshine;
+    this.smoothMoonScale = this.astroState.lunar.apparentScale;
 
-    this.smoothTideLevel = this.cosmicState.tidal.springNeapIndex;
+    this.smoothTideLevel = this.astroState.tidal.springNeapIndex;
     this.smoothWetTideMemory = this.smoothTideLevel;
-    this.smoothSwellEnergy = this.cosmicState.tidal.swellEnergy;
+    this.smoothSwellEnergy = this.astroState.tidal.swellEnergy;
     this.tideVelocity = 0;
     this.swellVelocity = 0;
 
-    this.smoothEpochYears = this.cosmicState.galactic.epochYearsSinceJ2000;
+    this.smoothEpochYears = this.astroState.galactic.epochYearsSinceJ2000;
     this.prevSmoothEpochYears = this.smoothEpochYears;
-    this.smoothPrecession = this.cosmicState.galactic.axialPrecessionRad;
+    this.smoothPrecession = this.astroState.galactic.axialPrecessionRad;
     if (this.mode !== "year") {
       this.smoothGalLonShift = 0;
     }
@@ -2045,7 +2045,7 @@ export class CosmicSceneRenderer {
     this.earthOrbitRoot.position.set(ex, 0, ez);
 
     // Fixed inertial axial obliquity around +X (North Pole tilts toward -Z = Summer Solstice Sun)
-    this.earthAxisGroup.rotation.set(-this.cosmicState.solar.obliquityRad, 0, 0);
+    this.earthAxisGroup.rotation.set(-this.astroState.solar.obliquityRad, 0, 0);
     this.earthAxisGroup.scale.setScalar(this.smoothEarthScale);
     // Diurnal sidereal spin matching GMST at rest and rotating smoothly while scrubbing
     this.earthSpinGroup.rotation.y = this.smoothSpinAngle;
@@ -2175,7 +2175,7 @@ export class CosmicSceneRenderer {
   }
 
   private computeModeCameraGoal(
-    mode: CosmicFocusMode,
+    mode: AstroFocusMode,
     outPos: THREE.Vector3,
     outTarget: THREE.Vector3,
   ) {
@@ -2197,7 +2197,7 @@ export class CosmicSceneRenderer {
     const s = flightEase(u);
 
     const targets = getModeVisualTargets(f.toMode);
-    const moonDistFactor = this.cosmicState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM;
+    const moonDistFactor = this.astroState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM;
     const targetMoonOrbitRadius =
       (f.toMode === "month" ? CAROUSEL_MOON_ORBIT_RADIUS : HERO_MOON_ORBIT_RADIUS) * moonDistFactor;
 
@@ -2487,7 +2487,7 @@ export class CosmicSceneRenderer {
     this.smoothSpinAngle = damp(this.smoothSpinAngle, effectiveSpinTarget, orbitLambda, dt);
 
     // Steady, velocity-ramped lunar catch-up relative to Earth while co-orbiting the Sun with Earth
-    const baseMoonRel = computeMoonRelAngle(this.cosmicState);
+    const baseMoonRel = computeMoonRelAngle(this.astroState);
     const moonRelOffset =
       dragFraction >= 0
         ? dragFraction * this.nextMoonRelDelta
@@ -2513,8 +2513,8 @@ export class CosmicSceneRenderer {
 
     const targetMoonLat =
       dragFraction >= 0
-        ? THREE.MathUtils.lerp(this.cosmicState.lunar.latitudeRad, this.nextMoonLat, dragFraction)
-        : THREE.MathUtils.lerp(this.cosmicState.lunar.latitudeRad, this.prevMoonLat, -dragFraction);
+        ? THREE.MathUtils.lerp(this.astroState.lunar.latitudeRad, this.nextMoonLat, dragFraction)
+        : THREE.MathUtils.lerp(this.astroState.lunar.latitudeRad, this.prevMoonLat, -dragFraction);
     this.smoothMoonLat = damp(this.smoothMoonLat, targetMoonLat, this.reducedMotion ? 60 : 3.2, dt);
 
     // Keep continuous unwrapped angles bounded once settled to preserve float precision
@@ -2540,7 +2540,7 @@ export class CosmicSceneRenderer {
       }
     }
 
-    const baseRadius = EARTH_ORBIT_RADIUS * this.cosmicState.solar.earthSunDistanceAU;
+    const baseRadius = EARTH_ORBIT_RADIUS * this.astroState.solar.earthSunDistanceAU;
     const targetRadius =
       dragFraction >= 0
         ? THREE.MathUtils.lerp(baseRadius, this.nextOrbitRadius, dragFraction)
@@ -2551,7 +2551,7 @@ export class CosmicSceneRenderer {
     this.smoothEarthScale = damp(this.smoothEarthScale, targetEarthScale, settleLambda, dt);
 
     if (!this.flight.active && (this.mode === "idle" || this.mode === "month")) {
-      const moonDistFactor = this.cosmicState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM;
+      const moonDistFactor = this.astroState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM;
       const targetMoonOrbitRadius =
         (this.mode === "month" ? CAROUSEL_MOON_ORBIT_RADIUS : HERO_MOON_ORBIT_RADIUS) *
         moonDistFactor;
@@ -2573,57 +2573,53 @@ export class CosmicSceneRenderer {
       dayFraction >= 0 ? dayFraction * this.nextDayAgeDelta : -dayFraction * this.prevDayAgeDelta;
     const targetDayLat =
       dayFraction >= 0
-        ? THREE.MathUtils.lerp(this.cosmicState.lunar.latitudeRad, this.nextDayLat, dayFraction)
-        : THREE.MathUtils.lerp(this.cosmicState.lunar.latitudeRad, this.prevDayLat, -dayFraction);
+        ? THREE.MathUtils.lerp(this.astroState.lunar.latitudeRad, this.nextDayLat, dayFraction)
+        : THREE.MathUtils.lerp(this.astroState.lunar.latitudeRad, this.prevDayLat, -dayFraction);
     const targetDayScale =
       dayFraction >= 0
-        ? THREE.MathUtils.lerp(this.cosmicState.lunar.apparentScale, this.nextDayScale, dayFraction)
+        ? THREE.MathUtils.lerp(this.astroState.lunar.apparentScale, this.nextDayScale, dayFraction)
         : THREE.MathUtils.lerp(
-            this.cosmicState.lunar.apparentScale,
+            this.astroState.lunar.apparentScale,
             this.prevDayScale,
             -dayFraction,
           );
     const targetDayIllum =
       dayFraction >= 0
-        ? THREE.MathUtils.lerp(this.cosmicState.lunar.illumination, this.nextDayIllum, dayFraction)
-        : THREE.MathUtils.lerp(
-            this.cosmicState.lunar.illumination,
-            this.prevDayIllum,
-            -dayFraction,
-          );
+        ? THREE.MathUtils.lerp(this.astroState.lunar.illumination, this.nextDayIllum, dayFraction)
+        : THREE.MathUtils.lerp(this.astroState.lunar.illumination, this.prevDayIllum, -dayFraction);
     const targetDayEarthshine =
       dayFraction >= 0
         ? THREE.MathUtils.lerp(
-            this.cosmicState.lunar.earthshine,
+            this.astroState.lunar.earthshine,
             this.nextDayEarthshine,
             dayFraction,
           )
         : THREE.MathUtils.lerp(
-            this.cosmicState.lunar.earthshine,
+            this.astroState.lunar.earthshine,
             this.prevDayEarthshine,
             -dayFraction,
           );
     const targetDayLibLon =
       dayFraction >= 0
         ? THREE.MathUtils.lerp(
-            this.cosmicState.lunar.librationLonRad,
+            this.astroState.lunar.librationLonRad,
             this.nextDayLibLon,
             dayFraction,
           )
         : THREE.MathUtils.lerp(
-            this.cosmicState.lunar.librationLonRad,
+            this.astroState.lunar.librationLonRad,
             this.prevDayLibLon,
             -dayFraction,
           );
     const targetDayLibLat =
       dayFraction >= 0
         ? THREE.MathUtils.lerp(
-            this.cosmicState.lunar.librationLatRad,
+            this.astroState.lunar.librationLatRad,
             this.nextDayLibLat,
             dayFraction,
           )
         : THREE.MathUtils.lerp(
-            this.cosmicState.lunar.librationLatRad,
+            this.astroState.lunar.librationLatRad,
             this.prevDayLibLat,
             -dayFraction,
           );
@@ -2665,20 +2661,16 @@ export class CosmicSceneRenderer {
     // Continuous sub-day tidal target with steady, constant-speed shoreline drift (zero jerk/debounce snap)
     const targetTideLevel =
       dayFraction >= 0
-        ? THREE.MathUtils.lerp(
-            this.cosmicState.tidal.springNeapIndex,
-            this.nextDayTide,
-            dayFraction,
-          )
+        ? THREE.MathUtils.lerp(this.astroState.tidal.springNeapIndex, this.nextDayTide, dayFraction)
         : THREE.MathUtils.lerp(
-            this.cosmicState.tidal.springNeapIndex,
+            this.astroState.tidal.springNeapIndex,
             this.prevDayTide,
             -dayFraction,
           );
     const targetSwellEnergy =
       dayFraction >= 0
-        ? THREE.MathUtils.lerp(this.cosmicState.tidal.swellEnergy, this.nextDaySwell, dayFraction)
-        : THREE.MathUtils.lerp(this.cosmicState.tidal.swellEnergy, this.prevDaySwell, -dayFraction);
+        ? THREE.MathUtils.lerp(this.astroState.tidal.swellEnergy, this.nextDaySwell, dayFraction)
+        : THREE.MathUtils.lerp(this.astroState.tidal.swellEnergy, this.prevDaySwell, -dayFraction);
 
     if (this.reducedMotion) {
       this.smoothTideLevel = targetTideLevel;
@@ -2720,7 +2712,7 @@ export class CosmicSceneRenderer {
 
     this.smoothEpochYears = damp(
       this.smoothEpochYears,
-      this.cosmicState.galactic.epochYearsSinceJ2000,
+      this.astroState.galactic.epochYearsSinceJ2000,
       astroLambda,
       dt,
     );
@@ -2732,7 +2724,7 @@ export class CosmicSceneRenderer {
 
     this.smoothPrecession = damp(
       this.smoothPrecession,
-      this.cosmicState.galactic.axialPrecessionRad,
+      this.astroState.galactic.axialPrecessionRad,
       astroLambda,
       dt,
     );

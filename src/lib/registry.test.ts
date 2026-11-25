@@ -19,6 +19,12 @@ describe("experiment registry", () => {
     expect(allTags).toEqual(expected);
   });
 
+  it("registers astro-date-picker with the expected slug and title", () => {
+    const entry = getExperimentBySlug("astro-date-picker");
+    expect(entry).toBeDefined();
+    expect(entry?.title).toBe("Astro Date Picker");
+  });
+
   it("returns undefined for an unknown slug", () => {
     expect(getExperimentBySlug("__nonexistent__")).toBeUndefined();
   });

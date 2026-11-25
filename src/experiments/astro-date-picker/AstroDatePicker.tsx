@@ -14,9 +14,9 @@ import {
   useState,
 } from "react";
 import { useStageActive } from "@/components/stage/StageContext";
-import { addDateSegment, computeCosmicState, getTodayIsoDate, parseIsoDate } from "./astronomy";
-import styles from "./CosmicDatePicker.module.css";
-import { type CosmicFocusMode, CosmicSceneRenderer } from "./CosmicScene";
+import styles from "./AstroDatePicker.module.css";
+import { type AstroFocusMode, AstroSceneRenderer } from "./AstroScene";
+import { addDateSegment, computeAstroState, getTodayIsoDate, parseIsoDate } from "./astronomy";
 
 type EditableDateUnit = "year" | "month" | "day";
 
@@ -48,7 +48,7 @@ function isEditableUnit(type: string | null | undefined): type is EditableDateUn
 
 type DateInputOnValueChange = NonNullable<ComponentProps<typeof DateInput>["onValueChange"]>;
 
-export interface CosmicDatePickerProps {
+export interface AstroDatePickerProps {
   label?: string;
   value?: string | null;
   defaultValue?: string;
@@ -62,7 +62,7 @@ export interface CosmicDatePickerProps {
   required?: boolean;
 }
 
-export function CosmicDatePicker({
+export function AstroDatePicker({
   label = "Date",
   value,
   defaultValue,
@@ -74,7 +74,7 @@ export function CosmicDatePicker({
   disabled = false,
   readOnly = false,
   required = false,
-}: CosmicDatePickerProps) {
+}: AstroDatePickerProps) {
   const stageActive = useStageActive();
   const [controller] = useState(createDateInputController);
   const [initialDefault] = useState<string | undefined>(() => defaultValue);
@@ -86,14 +86,14 @@ export function CosmicDatePicker({
     return getTodayIsoDate();
   });
 
-  const [focusMode, setFocusMode] = useState<CosmicFocusMode>("idle");
+  const [focusMode, setFocusMode] = useState<AstroFocusMode>("idle");
   const [dragging, setDragging] = useState(false);
 
   const cardRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const rendererRef = useRef<CosmicSceneRenderer | null>(null);
+  const rendererRef = useRef<AstroSceneRenderer | null>(null);
 
-  const focusModeRef = useRef<CosmicFocusMode>("idle");
+  const focusModeRef = useRef<AstroFocusMode>("idle");
   const lastValidIsoRef = useRef(lastValidIso);
   const monthFractionRef = useRef(0);
   const dayFractionRef = useRef(0);
@@ -124,8 +124,8 @@ export function CosmicDatePicker({
     lastValidIsoRef.current = lastValidIso;
   }, [lastValidIso]);
 
-  const cosmicState = useMemo(() => computeCosmicState(lastValidIso), [lastValidIso]);
-  const initialCosmicStateRef = useRef(cosmicState);
+  const astroState = useMemo(() => computeAstroState(lastValidIso), [lastValidIso]);
+  const initialAstroStateRef = useRef(astroState);
   const initialStageActiveRef = useRef(stageActive);
 
   useEffect(() => {
@@ -133,7 +133,7 @@ export function CosmicDatePicker({
     const card = cardRef.current;
     if (!canvas || !card) return;
 
-    const scene = CosmicSceneRenderer.create(canvas, initialCosmicStateRef.current);
+    const scene = AstroSceneRenderer.create(canvas, initialAstroStateRef.current);
     if (!scene) return;
     rendererRef.current = scene;
 
@@ -173,8 +173,8 @@ export function CosmicDatePicker({
   }, []);
 
   useEffect(() => {
-    rendererRef.current?.setState(cosmicState);
-  }, [cosmicState]);
+    rendererRef.current?.setState(astroState);
+  }, [astroState]);
 
   useEffect(() => {
     if (focusMode !== "month") {
@@ -380,7 +380,7 @@ export function CosmicDatePicker({
           drag.appliedSteps += stepDir;
           const stepIso = addDateSegment(drag.baseIso, drag.unit, drag.appliedSteps, min, max);
           if (parseIsoDate(stepIso)) {
-            rendererRef.current?.setState(computeCosmicState(stepIso));
+            rendererRef.current?.setState(computeAstroState(stepIso));
           }
         }
       } else {
@@ -391,7 +391,7 @@ export function CosmicDatePicker({
       controller.setValue(nextIso);
       if (parseIsoDate(nextIso)) {
         if (drag.unit !== "month" && drag.unit !== "day") {
-          rendererRef.current?.setState(computeCosmicState(nextIso));
+          rendererRef.current?.setState(computeAstroState(nextIso));
         }
         setLastValidIso(nextIso);
       }

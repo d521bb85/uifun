@@ -61,7 +61,7 @@ export interface GalacticState {
   solarApexLatRad: number;
 }
 
-export interface CosmicState {
+export interface AstroState {
   isoDate: string;
   date: ParsedDate;
   solar: SolarState;
@@ -403,7 +403,7 @@ export function computeGalacticState(jd: number): GalacticState {
   };
 }
 
-export function computeCosmicState(isoDate: string): CosmicState {
+export function computeAstroState(isoDate: string): AstroState {
   const parsed = parseIsoDate(isoDate) ?? { year: 2026, month: 11, day: 24 };
   const normalizedIso = formatIsoDate(parsed.year, parsed.month, parsed.day);
   const jd = toJulianDay(parsed.year, parsed.month, parsed.day, 12);

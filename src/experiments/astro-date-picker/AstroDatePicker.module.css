@@ -11,12 +11,21 @@
   background: radial-gradient(circle at 42% 48%, #0b1324 0%, #03060d 68%, #010206 100%);
   box-shadow:
     0 28px 64px -18px rgba(0, 0, 0, 0.58),
-    0 10px 24px -8px rgba(0, 0, 0, 0.36),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.09);
+    0 10px 24px -8px rgba(0, 0, 0, 0.36);
   user-select: none;
   touch-action: pan-y;
   cursor: pointer;
   isolation: isolate;
+}
+
+.card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  pointer-events: none;
+  z-index: 2;
 }
 
 .card[data-disabled] {

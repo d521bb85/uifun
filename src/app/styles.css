@@ -3,37 +3,109 @@
 @import "tailwindcss";
 @import "@ui-sdk/core/web.css" layer(components);
 
+@custom-variant dark {
+  &:where([data-color-scheme="dark"], [data-color-scheme="dark"] *) {
+    @slot;
+  }
+  @media (prefers-color-scheme: dark) {
+    &:where(:root:not([data-color-scheme="light"]), :root:not([data-color-scheme="light"]) *) {
+      @slot;
+    }
+  }
+}
+
 @theme {
   --font-sans:
     "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "DM Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 
-  --color-canvas: var(--canvas);
+  --color-page: var(--page);
+  --color-fg: var(--fg);
+  --color-dim: var(--dim);
+  --color-mid: var(--mid);
+  --color-dot: var(--dot);
+  --color-dot-hover: var(--dot-hover);
   --color-surface: var(--surface);
-  --color-surface-subtle: var(--surface-subtle);
-  --color-foreground: var(--foreground);
+  --color-line: var(--line);
+  --color-ghost: var(--ghost);
+  --color-thumb: var(--thumb);
+
+  --color-canvas: var(--page);
+  --color-surface-subtle: var(--surface);
+  --color-foreground: var(--fg);
   --color-muted: var(--muted);
-  --color-border: var(--border);
-  --color-accent: var(--accent);
+  --color-border: var(--line);
+  --color-accent: var(--thumb);
 }
 
 :root {
   color-scheme: light;
-  --canvas: #fafafa;
-  --surface: #ffffff;
-  --surface-subtle: #f4f4f5;
-  --foreground: #171717;
+  --page: #fafafa;
+  --fg: #171717;
+  --dim: #737373;
+  --mid: #a3a3a3;
+  --dot: #d4d4d4;
+  --dot-hover: #a3a3a3;
+  --surface: #f0f0f0;
+  --line: #00000014;
+  --ghost: #d4d4d4;
+  --thumb: #006bff;
+
   --muted: #737373;
-  --border: #e5e5e5;
-  --accent: #171717;
+  --ui-background: var(--page);
+  --ui-foreground: var(--fg);
+  --ui-muted: var(--surface);
+  --ui-muted-foreground: var(--muted);
+  --ui-border: var(--line);
+  --ui-input: var(--dot);
+  --ui-primary: var(--fg);
+  --ui-primary-foreground: var(--page);
+  --ui-ring: var(--dot);
+  --ui-ring-border: var(--fg);
+  --ui-font-sans: var(--font-sans);
+  --ui-font-mono: var(--font-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-color-scheme="light"]) {
+    color-scheme: dark;
+    --page: #000000;
+    --fg: #f5f5f5;
+    --dim: #525252;
+    --mid: #737373;
+    --dot: #404040;
+    --dot-hover: #a3a3a3;
+    --surface: #070707;
+    --line: #ffffff12;
+    --ghost: #262626;
+    --thumb: #006efe;
+
+    --muted: #a3a3a3;
+  }
+}
+
+:root[data-color-scheme="dark"] {
+  color-scheme: dark;
+  --page: #000000;
+  --fg: #f5f5f5;
+  --dim: #525252;
+  --mid: #737373;
+  --dot: #404040;
+  --dot-hover: #a3a3a3;
+  --surface: #070707;
+  --line: #ffffff12;
+  --ghost: #262626;
+  --thumb: #006efe;
+
+  --muted: #a3a3a3;
 }
 
 @layer base {
   html,
   body {
     min-height: 100%;
-    background-color: var(--canvas);
-    color: var(--foreground);
+    background-color: var(--page);
+    color: var(--fg);
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
