@@ -93,12 +93,14 @@ export function CosmicDatePicker({
 
   const focusModeRef = useRef<CosmicFocusMode>("idle");
   const lastValidIsoRef = useRef(lastValidIso);
+  const monthFractionRef = useRef(0);
 
   const dragRef = useRef<{
     pointerId: number;
     startX: number;
     originX: number;
     stepPx: number;
+    initialFraction: number;
     appliedSteps: number;
     baseIso: string;
     unit: EditableDateUnit;
@@ -172,6 +174,9 @@ export function CosmicDatePicker({
   }, [cosmicState]);
 
   useEffect(() => {
+    if (focusMode !== "month") {
+      monthFractionRef.current = 0;
+    }
     rendererRef.current?.setMode(focusMode);
   }, [focusMode]);
 
@@ -181,6 +186,10 @@ export function CosmicDatePicker({
 
   const handleValueChange: DateInputOnValueChange = (next, details) => {
     if (next && parseIsoDate(next)) {
+      if (!dragRef.current?.active && focusModeRef.current === "month") {
+        monthFractionRef.current = 0;
+        rendererRef.current?.setMonthDragState(false, 0);
+      }
       setLastValidIso(next);
     }
     onValueChange?.(next, details);
@@ -223,7 +232,13 @@ export function CosmicDatePicker({
       }
       setDragging(false);
     }
-    rendererRef.current?.setMonthDragState(false, 0);
+    if (drag.unit === "month") {
+      // Leave Earth right where the user released; normalize only when leaving month mode (e.g. back to Hero)
+      rendererRef.current?.setMonthDragState(false, monthFractionRef.current);
+    } else {
+      monthFractionRef.current = 0;
+      rendererRef.current?.setMonthDragState(false, 0);
+    }
     dragRef.current = null;
   }, []);
 
@@ -290,6 +305,7 @@ export function CosmicDatePicker({
       startX: event.clientX,
       originX: event.clientX,
       stepPx,
+      initialFraction: activeUnit === "month" ? monthFractionRef.current : 0,
       appliedSteps: 0,
       baseIso: controller.getValue() ?? lastValidIsoRef.current,
       unit: activeUnit,
@@ -325,7 +341,7 @@ export function CosmicDatePicker({
     }
 
     const dx = event.clientX - drag.originX;
-    const rawSteps = dx / drag.stepPx;
+    const rawSteps = drag.initialFraction + dx / drag.stepPx;
     const nextSteps =
       drag.unit === "month"
         ? computeSnappedSteps(rawSteps, drag.appliedSteps, MONTH_SNAP_THRESHOLD)
@@ -357,7 +373,9 @@ export function CosmicDatePicker({
     }
 
     if (drag.unit === "month") {
-      rendererRef.current?.setMonthDragState(true, rawSteps - nextSteps);
+      const nextFraction = rawSteps - nextSteps;
+      monthFractionRef.current = nextFraction;
+      rendererRef.current?.setMonthDragState(true, nextFraction);
     }
   };
 

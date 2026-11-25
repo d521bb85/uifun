@@ -1,12 +1,5 @@
 import * as THREE from "three";
-import {
-  addDateSegment,
-  type CosmicState,
-  computeCosmicState,
-  computeSolarState,
-  daysInMonth,
-  toJulianDay,
-} from "./astronomy";
+import { addDateSegment, type CosmicState, computeCosmicState } from "./astronomy";
 import {
   atmosphereFragmentShader,
   atmosphereVertexShader,
@@ -19,12 +12,6 @@ import {
   moonVertexShader,
   oceanFragmentShader,
   oceanVertexShader,
-  orbitMarkerFragmentShader,
-  orbitMarkerVertexShader,
-  orbitRadialFragmentShader,
-  orbitRadialVertexShader,
-  orbitRingFragmentShader,
-  orbitRingVertexShader,
   skyboxFragmentShader,
   skyboxVertexShader,
   starfieldFragmentShader,
@@ -43,16 +30,12 @@ const EARTH_ORBIT_RADIUS = 6.2;
 const MEAN_LUNAR_DISTANCE_KM = 384400;
 const MOON_PHYSICAL_RADIUS = 0.2725;
 const HERO_MOON_ORBIT_RADIUS = 3.2;
-const ORRERY_MOON_ORBIT_RADIUS = 1.48;
-const ORRERY_EARTH_SCALE = 0.74;
-const ORRERY_ELEVATION_RAD = THREE.MathUtils.degToRad(21);
-const ORRERY_DISTANCE = 17.8;
-const ORRERY_TARGET_Y = -0.26;
+const CAROUSEL_MOON_ORBIT_RADIUS = 1.75;
+const CAROUSEL_EARTH_SCALE = 1.0;
 const J2000_OBLIQUITY_RAD = THREE.MathUtils.degToRad(23.43929111);
 const TWO_PI = Math.PI * 2;
-const SEASONAL_MONTHS = new Set([3, 6, 9, 12]);
 
-// Hero (idle) framing: Earth fills the left corner (~1/3 of the card) with static Sun framed upper-right
+// Hero (idle) framing: Earth fills the left corner (~1/3 of the card) with static Sun upper-right
 // and the Moon orbiting honestly across its true 360° geocentric ecliptic path.
 const HERO_RIG = {
   radial: 1.12,
@@ -60,6 +43,18 @@ const HERO_RIG = {
   height: 0.8,
   targetWeight: 0.67,
   targetY: 0.02,
+  focusFollow: 0.35,
+};
+
+// Orbital Carousel (month) framing: closer to Earth on the horizontal front arc with static Sun
+// anchored upper-center and gentle, damped horizontal drift during drag.
+const CAROUSEL_RIG = {
+  radial: 5.1,
+  tangent: 2.2,
+  height: 3.3,
+  targetWeight: 0.54,
+  targetY: -0.54,
+  focusFollow: 0.0,
 };
 
 function damp(current: number, target: number, lambda: number, dt: number): number {
@@ -142,28 +137,6 @@ export class CosmicSceneRenderer {
   };
   private readonly sunCoronaMesh: THREE.Mesh;
 
-  private readonly orreryGroup: THREE.Group;
-  private readonly orbitRibbonUniforms: {
-    uEarthAngle: { value: number };
-    uOpacity: { value: number };
-  };
-  private readonly orbitMarkerUniforms: {
-    uPixelRatio: { value: number };
-    uActiveMonth: { value: number };
-    uOpacity: { value: number };
-  };
-  private readonly orbitMarkerPositions: Float32Array;
-  private readonly orbitMarkerGeo: THREE.BufferGeometry;
-  private readonly orbitTickPositions: Float32Array;
-  private readonly orbitTickGeo: THREE.BufferGeometry;
-  private readonly orbitTickMaterial: THREE.LineBasicMaterial;
-  private readonly orbitRadialPositions: Float32Array;
-  private readonly orbitRadialGeo: THREE.BufferGeometry;
-  private readonly orbitRadialUniforms: {
-    uOpacity: { value: number };
-  };
-  private orreryMarkerKey = "";
-
   private readonly earthOrbitRoot: THREE.Group;
   private readonly earthAxisGroup: THREE.Group;
   private readonly earthSpinGroup: THREE.Group;
@@ -230,18 +203,18 @@ export class CosmicSceneRenderer {
 
   private readonly camPos = new THREE.Vector3();
   private readonly camTarget = new THREE.Vector3();
-  private readonly heroCamPos = new THREE.Vector3();
-  private readonly heroCamTarget = new THREE.Vector3();
-  private readonly worldCamPos = new THREE.Vector3();
-  private readonly worldCamTarget = new THREE.Vector3();
-  private readonly desiredWorldPos = new THREE.Vector3();
-  private readonly desiredWorldTarget = new THREE.Vector3();
+  private readonly polarCamPos = new THREE.Vector3();
+  private readonly polarCamTarget = new THREE.Vector3();
+  private readonly nonEarthCamPos = new THREE.Vector3();
+  private readonly nonEarthCamTarget = new THREE.Vector3();
+  private readonly desiredNonEarthPos = new THREE.Vector3();
+  private readonly desiredNonEarthTarget = new THREE.Vector3();
   private readonly tmpSunDir = new THREE.Vector3();
 
   private targetOrbitAngle: number;
   private smoothOrbitAngle: number;
-  private smoothOrbitVel = 0;
-  private camOrbitLag = 0;
+  private trailOrbitAngle: number;
+  private camOrbitAngle: number;
   private monthDragging = false;
   private dragMonthFraction = 0;
   private nextMonthIso = "";
@@ -272,12 +245,17 @@ export class CosmicSceneRenderer {
   private smoothEpochYears: number;
   private smoothPrecession: number;
 
-  private heroRigBlend = 1;
+  private rigRadial = HERO_RIG.radial;
+  private rigTangent = HERO_RIG.tangent;
+  private rigHeight = HERO_RIG.height;
+  private rigTargetWeight = HERO_RIG.targetWeight;
+  private rigTargetY = HERO_RIG.targetY;
+  private rigFocusFollow = HERO_RIG.focusFollow;
+  private earthRigBlend = 1;
 
   private wEarth = 1;
   private wOrbitalMoon = 1;
   private wSun = 1;
-  private wOrrery = 0;
   private wMoon = 0;
   private wOcean = 0;
   private wGalactic = 0;
@@ -289,6 +267,8 @@ export class CosmicSceneRenderer {
     this.cosmicState = initialState;
     this.targetOrbitAngle = initialState.solar.earthHeliocentricLongitudeRad;
     this.smoothOrbitAngle = initialState.solar.earthHeliocentricLongitudeRad;
+    this.trailOrbitAngle = initialState.solar.earthHeliocentricLongitudeRad;
+    this.camOrbitAngle = initialState.solar.earthHeliocentricLongitudeRad;
     this.smoothOrbitRadius = EARTH_ORBIT_RADIUS * initialState.solar.earthSunDistanceAU;
     this.targetSpinAngle = initialState.solar.gmstRad;
     this.smoothSpinAngle = initialState.solar.gmstRad;
@@ -415,21 +395,6 @@ export class CosmicSceneRenderer {
     this.sunGroup.add(this.sunCoronaMesh);
     this.sunGroup.scale.setScalar(0.56);
     this.scene.add(this.sunGroup);
-
-    const orrery = this.createOrreryGroup();
-    this.orreryGroup = orrery.group;
-    this.orbitRibbonUniforms = orrery.ribbonUniforms;
-    this.orbitMarkerUniforms = orrery.markerUniforms;
-    this.orbitMarkerPositions = orrery.markerPositions;
-    this.orbitMarkerGeo = orrery.markerGeo;
-    this.orbitTickPositions = orrery.tickPositions;
-    this.orbitTickGeo = orrery.tickGeo;
-    this.orbitTickMaterial = orrery.tickMaterial;
-    this.orbitRadialPositions = orrery.radialPositions;
-    this.orbitRadialGeo = orrery.radialGeo;
-    this.orbitRadialUniforms = orrery.radialUniforms;
-    this.scene.add(this.orreryGroup);
-    this.updateOrreryMonthMarkers(initialState.date.year, initialState.date.day);
 
     this.earthOrbitRoot = new THREE.Group();
     this.earthAxisGroup = new THREE.Group();
@@ -571,10 +536,10 @@ export class CosmicSceneRenderer {
     this.scene.add(this.dayStageGroup);
 
     this.updateOrbitTransform(0);
-    this.computeHeroRigCamera(this.heroCamPos, this.heroCamTarget);
-    this.computeWorldCameraGoal("month", this.worldCamPos, this.worldCamTarget);
-    this.camPos.copy(this.heroCamPos);
-    this.camTarget.copy(this.heroCamTarget);
+    this.computeEarthRigCamera(this.polarCamPos, this.polarCamTarget);
+    this.computeNonEarthCameraGoal("year", this.nonEarthCamPos, this.nonEarthCamTarget);
+    this.camPos.copy(this.polarCamPos);
+    this.camTarget.copy(this.polarCamTarget);
     this.applyUniforms();
   }
 
@@ -584,194 +549,6 @@ export class CosmicSceneRenderer {
     } catch {
       return null;
     }
-  }
-
-  private createOrreryGroup() {
-    const group = new THREE.Group();
-
-    // 1. Anti-aliased elliptical orbital ribbon sampled along Earth's real eccentric orbit
-    const segs = 160;
-    const halfWidth = 0.11;
-    const positions = new Float32Array((segs + 1) * 2 * 3);
-    const angles = new Float32Array((segs + 1) * 2);
-    const radials = new Float32Array((segs + 1) * 2);
-    const indices: number[] = [];
-
-    const jdBase = toJulianDay(2026, 1, 1, 12);
-    for (let i = 0; i <= segs; i += 1) {
-      const solar = computeSolarState(jdBase + (i / segs) * 365.25636);
-      const angle = solar.earthHeliocentricLongitudeRad;
-      const radius = EARTH_ORBIT_RADIUS * solar.earthSunDistanceAU;
-      const cosA = Math.cos(angle);
-      const sinA = Math.sin(angle);
-
-      const innerR = radius - halfWidth;
-      const outerR = radius + halfWidth;
-
-      const vInner = i * 2;
-      const vOuter = vInner + 1;
-
-      positions[vInner * 3] = cosA * innerR;
-      positions[vInner * 3 + 1] = 0;
-      positions[vInner * 3 + 2] = -sinA * innerR;
-      angles[vInner] = angle;
-      radials[vInner] = -1;
-
-      positions[vOuter * 3] = cosA * outerR;
-      positions[vOuter * 3 + 1] = 0;
-      positions[vOuter * 3 + 2] = -sinA * outerR;
-      angles[vOuter] = angle;
-      radials[vOuter] = 1;
-
-      if (i < segs) {
-        const nextInner = (i + 1) * 2;
-        const nextOuter = nextInner + 1;
-        indices.push(vInner, vOuter, nextInner, vOuter, nextOuter, nextInner);
-      }
-    }
-
-    const ribbonGeo = new THREE.BufferGeometry();
-    ribbonGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    ribbonGeo.setAttribute("aAngle", new THREE.BufferAttribute(angles, 1));
-    ribbonGeo.setAttribute("aRadial", new THREE.BufferAttribute(radials, 1));
-    ribbonGeo.setIndex(indices);
-    this.geometries.push(ribbonGeo);
-
-    const ribbonUniforms = {
-      uEarthAngle: { value: this.smoothOrbitAngle },
-      uOpacity: { value: 0 },
-    };
-    const ribbonMaterial = new THREE.ShaderMaterial({
-      vertexShader: orbitRingVertexShader,
-      fragmentShader: orbitRingFragmentShader,
-      uniforms: ribbonUniforms,
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    this.materials.push(ribbonMaterial);
-
-    const ribbonMesh = new THREE.Mesh(ribbonGeo, ribbonMaterial);
-    ribbonMesh.renderOrder = -1;
-    group.add(ribbonMesh);
-
-    // 2. 12 radial graduation ticks (equinox/solstice months subtly longer)
-    const tickPositions = new Float32Array(12 * 2 * 3);
-    const tickGeo = new THREE.BufferGeometry();
-    tickGeo.setAttribute("position", new THREE.BufferAttribute(tickPositions, 3));
-    this.geometries.push(tickGeo);
-
-    const tickMaterial = new THREE.LineBasicMaterial({
-      color: 0x8eb8f0,
-      transparent: true,
-      opacity: 0,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
-    this.materials.push(tickMaterial);
-    group.add(new THREE.LineSegments(tickGeo, tickMaterial));
-
-    // 3. 12 luminous month markers positioned at each month's exact heliocentric longitude
-    const markerPositions = new Float32Array(12 * 3);
-    const monthIndices = new Float32Array(12);
-    const seasonFlags = new Float32Array(12);
-    for (let m = 1; m <= 12; m += 1) {
-      monthIndices[m - 1] = m;
-      seasonFlags[m - 1] = SEASONAL_MONTHS.has(m) ? 1 : 0;
-    }
-
-    const markerGeo = new THREE.BufferGeometry();
-    markerGeo.setAttribute("position", new THREE.BufferAttribute(markerPositions, 3));
-    markerGeo.setAttribute("aMonthIndex", new THREE.BufferAttribute(monthIndices, 1));
-    markerGeo.setAttribute("aSeasonal", new THREE.BufferAttribute(seasonFlags, 1));
-    this.geometries.push(markerGeo);
-
-    const markerUniforms = {
-      uPixelRatio: { value: Math.min(window.devicePixelRatio || 1, 2) },
-      uActiveMonth: { value: this.cosmicState.date.month },
-      uOpacity: { value: 0 },
-    };
-    const markerMaterial = new THREE.ShaderMaterial({
-      vertexShader: orbitMarkerVertexShader,
-      fragmentShader: orbitMarkerFragmentShader,
-      uniforms: markerUniforms,
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
-    this.materials.push(markerMaterial);
-    group.add(new THREE.Points(markerGeo, markerMaterial));
-
-    // 4. Subtle Sun-to-Earth heliocentric radius guide
-    const radialPositions = new Float32Array(2 * 3);
-    const radialAlong = new Float32Array([0, 1]);
-    const radialGeo = new THREE.BufferGeometry();
-    radialGeo.setAttribute("position", new THREE.BufferAttribute(radialPositions, 3));
-    radialGeo.setAttribute("aAlong", new THREE.BufferAttribute(radialAlong, 1));
-    this.geometries.push(radialGeo);
-
-    const radialUniforms = {
-      uOpacity: { value: 0 },
-    };
-    const radialMaterial = new THREE.ShaderMaterial({
-      vertexShader: orbitRadialVertexShader,
-      fragmentShader: orbitRadialFragmentShader,
-      uniforms: radialUniforms,
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
-    this.materials.push(radialMaterial);
-    group.add(new THREE.Line(radialGeo, radialMaterial));
-
-    return {
-      group,
-      ribbonUniforms,
-      markerUniforms,
-      markerPositions,
-      markerGeo,
-      tickPositions,
-      tickGeo,
-      tickMaterial,
-      radialPositions,
-      radialGeo,
-      radialUniforms,
-    };
-  }
-
-  private updateOrreryMonthMarkers(year: number, day: number) {
-    const key = `${year}-${day}`;
-    if (this.orreryMarkerKey === key) return;
-    this.orreryMarkerKey = key;
-
-    for (let m = 1; m <= 12; m += 1) {
-      const clampedDay = Math.min(day, daysInMonth(year, m));
-      const solar = computeSolarState(toJulianDay(year, m, clampedDay, 12));
-      const angle = solar.earthHeliocentricLongitudeRad;
-      const radius = EARTH_ORBIT_RADIUS * solar.earthSunDistanceAU;
-      const cosA = Math.cos(angle);
-      const sinA = Math.sin(angle);
-
-      const idx = m - 1;
-      this.orbitMarkerPositions[idx * 3] = cosA * radius;
-      this.orbitMarkerPositions[idx * 3 + 1] = 0.01;
-      this.orbitMarkerPositions[idx * 3 + 2] = -sinA * radius;
-
-      const tickHalf = SEASONAL_MONTHS.has(m) ? 0.25 : 0.13;
-      const rIn = radius - tickHalf;
-      const rOut = radius + tickHalf;
-      const base = idx * 6;
-      this.orbitTickPositions[base] = cosA * rIn;
-      this.orbitTickPositions[base + 1] = 0;
-      this.orbitTickPositions[base + 2] = -sinA * rIn;
-      this.orbitTickPositions[base + 3] = cosA * rOut;
-      this.orbitTickPositions[base + 4] = 0;
-      this.orbitTickPositions[base + 5] = -sinA * rOut;
-    }
-
-    (this.orbitMarkerGeo.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
-    (this.orbitTickGeo.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
   }
 
   private createHipparcosStarfield() {
@@ -940,7 +717,6 @@ export class CosmicSceneRenderer {
     this.camera.updateProjectionMatrix();
     this.starUniforms.uPixelRatio.value = dpr;
     this.galacticDustUniforms.uPixelRatio.value = dpr;
-    this.orbitMarkerUniforms.uPixelRatio.value = dpr;
     this.renderSingleFrame();
   }
 
@@ -978,7 +754,7 @@ export class CosmicSceneRenderer {
 
   setMonthDragState(dragging: boolean, fraction: number) {
     this.monthDragging = dragging;
-    this.dragMonthFraction = dragging ? THREE.MathUtils.clamp(fraction, -1, 1) : 0;
+    this.dragMonthFraction = THREE.MathUtils.clamp(fraction, -1, 1);
   }
 
   setState(next: CosmicState) {
@@ -1034,7 +810,6 @@ export class CosmicSceneRenderer {
     }
 
     this.updateMonthNeighbors();
-    this.updateOrreryMonthMarkers(next.date.year, next.date.day);
 
     if (!this.active || this.reducedMotion) {
       this.snapToTargets();
@@ -1050,8 +825,8 @@ export class CosmicSceneRenderer {
       this.dragMonthFraction = 0;
     }
 
-    if (mode !== "idle" && this.heroRigBlend > 0.95) {
-      this.computeWorldCameraGoal(mode, this.worldCamPos, this.worldCamTarget);
+    if ((mode === "day" || mode === "year") && this.earthRigBlend > 0.95) {
+      this.computeNonEarthCameraGoal(mode, this.nonEarthCamPos, this.nonEarthCamTarget);
     }
 
     if (!this.active || this.reducedMotion) {
@@ -1105,18 +880,19 @@ export class CosmicSceneRenderer {
     this.dragMonthFraction = 0;
     this.targetOrbitAngle = this.cosmicState.solar.earthHeliocentricLongitudeRad;
     this.smoothOrbitAngle = this.targetOrbitAngle;
-    this.smoothOrbitVel = 0;
-    this.camOrbitLag = 0;
+    this.trailOrbitAngle = this.targetOrbitAngle;
+    this.camOrbitAngle = this.targetOrbitAngle;
     this.smoothOrbitRadius = EARTH_ORBIT_RADIUS * this.cosmicState.solar.earthSunDistanceAU;
     this.targetSpinAngle = this.cosmicState.solar.gmstRad;
     this.smoothSpinAngle = this.targetSpinAngle;
     this.targetMoonLon = this.cosmicState.lunar.longitudeRad;
     this.smoothMoonLon = this.targetMoonLon;
     this.smoothMoonLat = this.cosmicState.lunar.latitudeRad;
-    this.smoothEarthScale = this.mode === "month" ? ORRERY_EARTH_SCALE : 1;
+    this.smoothEarthScale = this.mode === "month" ? CAROUSEL_EARTH_SCALE : 1;
     const moonDistFactor = this.cosmicState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM;
     this.smoothMoonOrbitRadius =
-      (this.mode === "month" ? ORRERY_MOON_ORBIT_RADIUS : HERO_MOON_ORBIT_RADIUS) * moonDistFactor;
+      (this.mode === "month" ? CAROUSEL_MOON_ORBIT_RADIUS : HERO_MOON_ORBIT_RADIUS) *
+      moonDistFactor;
     this.smoothMoonElong = this.cosmicState.lunar.elongationRad;
     this.smoothMoonIllum = this.cosmicState.lunar.illumination;
     this.smoothMoonScale = this.cosmicState.lunar.apparentScale;
@@ -1125,12 +901,18 @@ export class CosmicSceneRenderer {
     this.smoothEpochYears = this.cosmicState.galactic.epochYearsSinceJ2000;
     this.smoothPrecession = this.cosmicState.galactic.axialPrecessionRad;
 
-    this.heroRigBlend = this.mode === "idle" ? 1 : 0;
+    const rig = this.mode === "month" ? CAROUSEL_RIG : HERO_RIG;
+    this.rigRadial = rig.radial;
+    this.rigTangent = rig.tangent;
+    this.rigHeight = rig.height;
+    this.rigTargetWeight = rig.targetWeight;
+    this.rigTargetY = rig.targetY;
+    this.rigFocusFollow = rig.focusFollow;
+    this.earthRigBlend = this.mode === "idle" || this.mode === "month" ? 1 : 0;
 
     this.wEarth = this.mode === "idle" || this.mode === "month" ? 1 : 0;
     this.wOrbitalMoon = this.mode === "idle" || this.mode === "month" ? 1 : 0;
     this.wSun = this.mode === "idle" || this.mode === "month" || this.mode === "year" ? 1 : 0;
-    this.wOrrery = this.mode === "month" ? 1 : 0;
     this.wMoon = this.mode === "day" ? 1 : 0;
     this.wOcean = this.mode === "day" ? 1 : 0;
     this.wGalactic = this.mode === "year" ? 1 : 0;
@@ -1145,22 +927,22 @@ export class CosmicSceneRenderer {
             ? 0.86
             : 0.84;
     this.smoothSkyReveal =
-      this.mode === "year" ? 1 : this.mode === "month" ? 0.18 : this.mode === "day" ? 0.05 : 0.16;
+      this.mode === "year" ? 1 : this.mode === "month" ? 0.22 : this.mode === "day" ? 0.05 : 0.16;
 
     if (this.mode !== "year") {
       this.sunGroup.position.set(0, 0, 0);
     }
     this.sunGroup.scale.setScalar(
-      this.mode === "year" ? 0.34 : this.mode === "month" ? 0.82 : 0.56,
+      this.mode === "year" ? 0.34 : this.mode === "month" ? 0.78 : 0.56,
     );
 
     this.updateOrbitTransform(0);
-    this.computeHeroRigCamera(this.heroCamPos, this.heroCamTarget);
-    if (this.mode !== "idle") {
-      this.computeWorldCameraGoal(this.mode, this.worldCamPos, this.worldCamTarget);
+    this.computeEarthRigCamera(this.polarCamPos, this.polarCamTarget);
+    if (this.mode === "day" || this.mode === "year") {
+      this.computeNonEarthCameraGoal(this.mode, this.nonEarthCamPos, this.nonEarthCamTarget);
     }
-    this.camPos.lerpVectors(this.worldCamPos, this.heroCamPos, this.heroRigBlend);
-    this.camTarget.lerpVectors(this.worldCamTarget, this.heroCamTarget, this.heroRigBlend);
+    this.camPos.lerpVectors(this.nonEarthCamPos, this.polarCamPos, this.earthRigBlend);
+    this.camTarget.lerpVectors(this.nonEarthCamTarget, this.polarCamTarget, this.earthRigBlend);
     this.applyUniforms();
   }
 
@@ -1195,15 +977,6 @@ export class CosmicSceneRenderer {
     // Physically lit by the static Sun at world origin (0, 0, 0)
     this.orbitalMoonUniforms.uSunDir.value.set(-(ex + mx), -my, -(ez + mz)).normalize();
 
-    // Update heliocentric Sun-to-Earth guide segment in Orrery view
-    this.orbitRadialPositions[0] = 0;
-    this.orbitRadialPositions[1] = 0;
-    this.orbitRadialPositions[2] = 0;
-    this.orbitRadialPositions[3] = ex;
-    this.orbitRadialPositions[4] = 0;
-    this.orbitRadialPositions[5] = ez;
-    (this.orbitRadialGeo.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
-
     const ambientTime = this.reducedMotion ? 0 : this.elapsed;
     const galPhase = this.smoothEpochYears * 0.042;
     const sunArcX = Math.sin(galPhase * 0.45) * 1.45 + Math.sin(ambientTime * 0.14) * 0.06;
@@ -1228,7 +1001,7 @@ export class CosmicSceneRenderer {
       }
     }
 
-    const sunScale = this.mode === "year" ? 0.34 : this.mode === "month" ? 0.82 : 0.56;
+    const sunScale = this.mode === "year" ? 0.34 : this.mode === "month" ? 0.78 : 0.56;
     const nextSunScale = damp(this.sunGroup.scale.x, sunScale, 5.5, dt || 0.016);
     this.sunGroup.scale.setScalar(nextSunScale);
 
@@ -1246,9 +1019,12 @@ export class CosmicSceneRenderer {
     this.skyGroup.rotation.y = this.smoothPrecession + galLonShift;
   }
 
-  private computeHeroRigCamera(outPos: THREE.Vector3, outTarget: THREE.Vector3) {
-    // Polar co-orbiting Hero camera: frames Earth in the left corner and the static Sun upper-right.
-    const camAngle = this.smoothOrbitAngle - this.camOrbitLag;
+  private computeEarthRigCamera(outPos: THREE.Vector3, outTarget: THREE.Vector3) {
+    // Polar co-orbiting camera around the static Sun:
+    // - In idle (Hero): tightly tracks Earth in the left corner with the Sun upper-right.
+    // - In month (Orbital Carousel): trails elastically so Earth swings 1:1 left/right along
+    //   the horizontal front arc while the Sun stays anchored upper-center and the stars revolve.
+    const camAngle = this.camOrbitAngle;
     const radialOutX = Math.cos(camAngle);
     const radialOutZ = -Math.sin(camAngle);
     const tangentX = -Math.sin(camAngle);
@@ -1262,37 +1038,27 @@ export class CosmicSceneRenderer {
     const swayY = Math.cos(t * 0.13) * 0.03;
 
     outPos.set(
-      anchorX + radialOutX * HERO_RIG.radial + tangentX * (HERO_RIG.tangent + swayTangent),
-      HERO_RIG.height + swayY,
-      anchorZ + radialOutZ * HERO_RIG.radial + tangentZ * (HERO_RIG.tangent + swayTangent),
+      anchorX + radialOutX * this.rigRadial + tangentX * (this.rigTangent + swayTangent),
+      this.rigHeight + swayY,
+      anchorZ + radialOutZ * this.rigRadial + tangentZ * (this.rigTangent + swayTangent),
     );
 
     const ex = this.earthOrbitRoot.position.x;
     const ez = this.earthOrbitRoot.position.z;
-    const focusX = THREE.MathUtils.lerp(anchorX, ex, 0.35);
-    const focusZ = THREE.MathUtils.lerp(anchorZ, ez, 0.35);
+    const focusX = THREE.MathUtils.lerp(anchorX, ex, this.rigFocusFollow);
+    const focusZ = THREE.MathUtils.lerp(anchorZ, ez, this.rigFocusFollow);
 
-    outTarget.set(focusX * HERO_RIG.targetWeight, HERO_RIG.targetY, focusZ * HERO_RIG.targetWeight);
+    outTarget.set(focusX * this.rigTargetWeight, this.rigTargetY, focusZ * this.rigTargetWeight);
   }
 
-  private computeWorldCameraGoal(
-    mode: "month" | "year" | "day",
+  private computeNonEarthCameraGoal(
+    mode: "year" | "day",
     outPos: THREE.Vector3,
     outTarget: THREE.Vector3,
   ) {
     const t = this.reducedMotion ? 0 : this.elapsed;
     const swayX = Math.sin(t * 0.16) * 0.065;
     const swayY = Math.cos(t * 0.13) * 0.04;
-
-    if (mode === "month") {
-      // Elevated perspective Orrery overlooking Earth's full horizontal orbit around the static Sun:
-      // +Z camera looks toward origin so prograde motion (CCW from North) sweeps left -> right in front.
-      const camY = Math.sin(ORRERY_ELEVATION_RAD) * ORRERY_DISTANCE;
-      const camZ = Math.cos(ORRERY_ELEVATION_RAD) * ORRERY_DISTANCE;
-      outPos.set(swayX * 1.15, camY + swayY * 0.85, camZ);
-      outTarget.set(0, ORRERY_TARGET_Y, 0);
-      return;
-    }
 
     if (mode === "year") {
       const epochDrift = Math.sin(this.smoothEpochYears * 0.019) * 0.45;
@@ -1328,14 +1094,6 @@ export class CosmicSceneRenderer {
     this.sunCoronaUniforms.uTime.value = this.elapsed;
     this.sunCoronaUniforms.uOpacity.value = this.wSun;
     this.sunGroup.visible = this.wSun > 0.005;
-
-    this.orbitRibbonUniforms.uEarthAngle.value = this.smoothOrbitAngle;
-    this.orbitRibbonUniforms.uOpacity.value = this.wOrrery;
-    this.orbitMarkerUniforms.uActiveMonth.value = this.cosmicState.date.month;
-    this.orbitMarkerUniforms.uOpacity.value = this.wOrrery;
-    this.orbitTickMaterial.opacity = this.wOrrery * 0.34;
-    this.orbitRadialUniforms.uOpacity.value = this.wOrrery;
-    this.orreryGroup.visible = this.wOrrery > 0.005;
 
     this.moonUniforms.uEarthshine.value = this.cosmicState.lunar.earthshine;
     this.moonUniforms.uOpacity.value = this.wMoon;
@@ -1378,7 +1136,7 @@ export class CosmicSceneRenderer {
       this.elapsed += dt;
     }
 
-    const orbitLambda = this.reducedMotion ? 60 : this.monthDragging ? 18 : 7.0;
+    const orbitLambda = this.reducedMotion ? 60 : this.monthDragging ? 12.5 : 6.5;
     const astroLambda = this.reducedMotion ? 60 : 7.5;
     const camLambda = this.reducedMotion ? 60 : 5.6;
     const fadeLambda = this.reducedMotion ? 60 : 6.4;
@@ -1396,16 +1154,23 @@ export class CosmicSceneRenderer {
     const effectiveSpinTarget = this.targetSpinAngle + spinOffset;
     const effectiveMoonLonTarget = this.targetMoonLon + moonLonOffset;
 
-    const prevOrbitAngle = this.smoothOrbitAngle;
     this.smoothOrbitAngle = damp(this.smoothOrbitAngle, effectiveOrbitTarget, orbitLambda, dt);
-    const rawOrbitVel = dt > 0.0001 ? (this.smoothOrbitAngle - prevOrbitAngle) / dt : 0;
-    this.smoothOrbitVel = damp(this.smoothOrbitVel, rawOrbitVel, 7.5, dt);
 
-    const targetLag =
-      this.reducedMotion || this.mode !== "idle"
-        ? 0
-        : THREE.MathUtils.clamp(this.smoothOrbitVel * 0.022, -0.025, 0.025);
-    this.camOrbitLag = damp(this.camOrbitLag, targetLag, 9.0, dt);
+    // Inertial camera lead: camera smoothly leads slightly ahead of Earth in the drag direction
+    // so Earth shifts subtly opposite the drag (as if trailing with planetary mass/inertia)
+    // and gently catches up on release without any abrupt clamp or overshoot.
+    if (this.reducedMotion) {
+      this.trailOrbitAngle = this.smoothOrbitAngle;
+      this.camOrbitAngle = this.smoothOrbitAngle;
+    } else {
+      const chaseLambda = this.mode === "month" ? 7.5 : 14.0;
+      const maxLag = this.mode === "month" ? 0.075 : 0.025;
+      const nextTrail = damp(this.trailOrbitAngle, this.smoothOrbitAngle, chaseLambda, dt);
+      const rawLag = this.smoothOrbitAngle - nextTrail;
+      const softLag = maxLag * Math.tanh(rawLag / maxLag);
+      this.trailOrbitAngle = this.smoothOrbitAngle - softLag;
+      this.camOrbitAngle = this.smoothOrbitAngle + softLag;
+    }
 
     // Keep Earth's axial spin and Moon's geocentric orbit locked to the same damper as Earth's orbit
     this.smoothSpinAngle = damp(this.smoothSpinAngle, effectiveSpinTarget, orbitLambda, dt);
@@ -1421,11 +1186,14 @@ export class CosmicSceneRenderer {
     if (!this.monthDragging && this.dragMonthFraction === 0) {
       if (
         Math.abs(this.targetOrbitAngle - this.smoothOrbitAngle) < 0.0005 &&
+        Math.abs(this.smoothOrbitAngle - this.trailOrbitAngle) < 0.0005 &&
         Math.abs(this.smoothOrbitAngle) > Math.PI * 8
       ) {
         const shift = Math.round(this.smoothOrbitAngle / TWO_PI) * TWO_PI;
         this.targetOrbitAngle -= shift;
         this.smoothOrbitAngle -= shift;
+        this.trailOrbitAngle -= shift;
+        this.camOrbitAngle -= shift;
       }
       if (
         Math.abs(this.targetSpinAngle - this.smoothSpinAngle) < 0.0005 &&
@@ -1452,12 +1220,13 @@ export class CosmicSceneRenderer {
         : THREE.MathUtils.lerp(baseRadius, this.prevOrbitRadius, -dragFraction);
     this.smoothOrbitRadius = damp(this.smoothOrbitRadius, targetRadius, orbitLambda, dt);
 
-    const targetEarthScale = this.mode === "month" ? ORRERY_EARTH_SCALE : 1;
+    const targetEarthScale = this.mode === "month" ? CAROUSEL_EARTH_SCALE : 1;
     this.smoothEarthScale = damp(this.smoothEarthScale, targetEarthScale, camLambda, dt);
 
     const moonDistFactor = this.cosmicState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM;
     const targetMoonOrbitRadius =
-      (this.mode === "month" ? ORRERY_MOON_ORBIT_RADIUS : HERO_MOON_ORBIT_RADIUS) * moonDistFactor;
+      (this.mode === "month" ? CAROUSEL_MOON_ORBIT_RADIUS : HERO_MOON_ORBIT_RADIUS) *
+      moonDistFactor;
     this.smoothMoonOrbitRadius = damp(
       this.smoothMoonOrbitRadius,
       targetMoonOrbitRadius,
@@ -1511,7 +1280,6 @@ export class CosmicSceneRenderer {
     const targetEarth = this.mode === "idle" || this.mode === "month" ? 1 : 0;
     const targetOrbitalMoon = this.mode === "idle" || this.mode === "month" ? 1 : 0;
     const targetSun = this.mode === "idle" || this.mode === "month" || this.mode === "year" ? 1 : 0;
-    const targetOrrery = this.mode === "month" ? 1 : 0;
     const targetMoon = this.mode === "day" ? 1 : 0;
     const targetOcean = this.mode === "day" ? 1 : 0;
     const targetGalactic = this.mode === "year" ? 1 : 0;
@@ -1526,12 +1294,11 @@ export class CosmicSceneRenderer {
             ? 0.86
             : 0.84;
     const targetSkyReveal =
-      this.mode === "year" ? 1 : this.mode === "month" ? 0.18 : this.mode === "day" ? 0.05 : 0.16;
+      this.mode === "year" ? 1 : this.mode === "month" ? 0.22 : this.mode === "day" ? 0.05 : 0.16;
 
     this.wEarth = damp(this.wEarth, targetEarth, fadeLambda, dt);
     this.wOrbitalMoon = damp(this.wOrbitalMoon, targetOrbitalMoon, fadeLambda, dt);
     this.wSun = damp(this.wSun, targetSun, fadeLambda, dt);
-    this.wOrrery = damp(this.wOrrery, targetOrrery, fadeLambda, dt);
     this.wMoon = damp(this.wMoon, targetMoon, fadeLambda, dt);
     this.wOcean = damp(this.wOcean, targetOcean, fadeLambda, dt);
     this.wGalactic = damp(this.wGalactic, targetGalactic, fadeLambda, dt);
@@ -1539,26 +1306,51 @@ export class CosmicSceneRenderer {
     this.smoothSkyGamma = damp(this.smoothSkyGamma, targetSkyGamma, fadeLambda, dt);
     this.smoothSkyReveal = damp(this.smoothSkyReveal, targetSkyReveal, fadeLambda, dt);
 
-    const targetHeroRig = this.mode === "idle" ? 1 : 0;
-    this.heroRigBlend = damp(this.heroRigBlend, targetHeroRig, camLambda, dt);
+    const rig = this.mode === "month" ? CAROUSEL_RIG : HERO_RIG;
+    this.rigRadial = damp(this.rigRadial, rig.radial, camLambda, dt);
+    this.rigTangent = damp(this.rigTangent, rig.tangent, camLambda, dt);
+    this.rigHeight = damp(this.rigHeight, rig.height, camLambda, dt);
+    this.rigTargetWeight = damp(this.rigTargetWeight, rig.targetWeight, camLambda, dt);
+    this.rigTargetY = damp(this.rigTargetY, rig.targetY, camLambda, dt);
+    this.rigFocusFollow = damp(this.rigFocusFollow, rig.focusFollow, camLambda, dt);
+    this.earthRigBlend = damp(this.earthRigBlend, targetEarth, camLambda, dt);
 
     this.updateOrbitTransform(dt);
-    this.computeHeroRigCamera(this.heroCamPos, this.heroCamTarget);
+    this.computeEarthRigCamera(this.polarCamPos, this.polarCamTarget);
 
-    if (this.mode !== "idle") {
-      this.computeWorldCameraGoal(this.mode, this.desiredWorldPos, this.desiredWorldTarget);
-      this.worldCamPos.x = damp(this.worldCamPos.x, this.desiredWorldPos.x, camLambda, dt);
-      this.worldCamPos.y = damp(this.worldCamPos.y, this.desiredWorldPos.y, camLambda, dt);
-      this.worldCamPos.z = damp(this.worldCamPos.z, this.desiredWorldPos.z, camLambda, dt);
-      this.worldCamTarget.x = damp(this.worldCamTarget.x, this.desiredWorldTarget.x, camLambda, dt);
-      this.worldCamTarget.y = damp(this.worldCamTarget.y, this.desiredWorldTarget.y, camLambda, dt);
-      this.worldCamTarget.z = damp(this.worldCamTarget.z, this.desiredWorldTarget.z, camLambda, dt);
+    if (this.mode === "day" || this.mode === "year") {
+      this.computeNonEarthCameraGoal(
+        this.mode,
+        this.desiredNonEarthPos,
+        this.desiredNonEarthTarget,
+      );
+      this.nonEarthCamPos.x = damp(this.nonEarthCamPos.x, this.desiredNonEarthPos.x, camLambda, dt);
+      this.nonEarthCamPos.y = damp(this.nonEarthCamPos.y, this.desiredNonEarthPos.y, camLambda, dt);
+      this.nonEarthCamPos.z = damp(this.nonEarthCamPos.z, this.desiredNonEarthPos.z, camLambda, dt);
+      this.nonEarthCamTarget.x = damp(
+        this.nonEarthCamTarget.x,
+        this.desiredNonEarthTarget.x,
+        camLambda,
+        dt,
+      );
+      this.nonEarthCamTarget.y = damp(
+        this.nonEarthCamTarget.y,
+        this.desiredNonEarthTarget.y,
+        camLambda,
+        dt,
+      );
+      this.nonEarthCamTarget.z = damp(
+        this.nonEarthCamTarget.z,
+        this.desiredNonEarthTarget.z,
+        camLambda,
+        dt,
+      );
     }
 
-    const b = THREE.MathUtils.clamp(this.heroRigBlend, 0, 1);
+    const b = THREE.MathUtils.clamp(this.earthRigBlend, 0, 1);
     const smoothBlend = b * b * (3 - 2 * b);
-    this.camPos.lerpVectors(this.worldCamPos, this.heroCamPos, smoothBlend);
-    this.camTarget.lerpVectors(this.worldCamTarget, this.heroCamTarget, smoothBlend);
+    this.camPos.lerpVectors(this.nonEarthCamPos, this.polarCamPos, smoothBlend);
+    this.camTarget.lerpVectors(this.nonEarthCamTarget, this.polarCamTarget, smoothBlend);
 
     this.applyUniforms();
     this.renderSingleFrame();
