@@ -27,6 +27,8 @@ import {
   type EditableDateUnit,
   getStepPxForUnit,
   isEditableUnit,
+  resolveTouchEndBehavior,
+  type TouchSessionState,
 } from "./dragMath";
 
 type DateInputProps = ComponentProps<typeof DateInput>;
@@ -111,7 +113,7 @@ export function AstroDatePicker({
   const monthFractionRef = useRef(0);
   const dayFractionRef = useRef(0);
   const dragRef = useRef<ActiveDragState | null>(null);
-  const suppressNextBlurRef = useRef(false);
+  const touchSessionRef = useRef<TouchSessionState | null>(null);
 
   useEffect(() => {
     if (isControlled && value && parseIsoDate(value)) {
@@ -355,19 +357,21 @@ export function AstroDatePicker({
 
   const isFieldDisabled = () => disabled || Boolean(cardRef.current?.hasAttribute("data-disabled"));
 
-  const focusUnitWithoutScroll = (unit: EditableDateUnit) => {
-    const segmentEl = cardRef.current?.querySelector<HTMLElement>(
-      `[data-slot="date-input-segment"][data-type="${unit}"]`,
-    );
-    if (segmentEl) {
-      segmentEl.focus({ preventScroll: true });
-    } else {
-      controller.focus(unit);
-    }
-  };
+  const focusUnitWithoutScroll = useCallback(
+    (unit: EditableDateUnit) => {
+      const segmentEl = cardRef.current?.querySelector<HTMLElement>(
+        `[data-slot="date-input-segment"][data-type="${unit}"]`,
+      );
+      if (segmentEl) {
+        segmentEl.focus({ preventScroll: true });
+      } else {
+        controller.focus(unit);
+      }
+    },
+    [controller],
+  );
 
   const handleFocusCapture = (event: FocusEvent<HTMLDivElement>) => {
-    suppressNextBlurRef.current = false;
     const target = event.target as HTMLElement | null;
     const segmentEl = target?.closest<HTMLElement>('[data-slot="date-input-segment"]');
     const unit = segmentEl?.dataset.type;
@@ -377,14 +381,11 @@ export function AstroDatePicker({
   };
 
   const handleBlur = (event: FocusEvent<HTMLDivElement>) => {
-    if (suppressNextBlurRef.current) {
-      suppressNextBlurRef.current = false;
-      return;
-    }
     const nextFocused = event.relatedTarget as Node | null;
     if (nextFocused && cardRef.current?.contains(nextFocused)) {
       return;
     }
+    touchSessionRef.current = null;
     endActiveDrag();
     setFocusMode("idle");
   };
@@ -404,6 +405,7 @@ export function AstroDatePicker({
         focusModeRef.current !== "idle" &&
         !cardRef.current?.contains(event.target as Node | null)
       ) {
+        touchSessionRef.current = null;
         endActiveDrag();
         setFocusMode("idle");
       }
@@ -415,6 +417,7 @@ export function AstroDatePicker({
       }
     };
     const handleGlobalRelease = () => {
+      touchSessionRef.current = null;
       if (dragRef.current) {
         endActiveDrag();
       }
@@ -438,6 +441,47 @@ export function AstroDatePicker({
   }, [endActiveDrag, markPointerInput]);
 
   useEffect(() => {
+    const card = cardRef.current;
+    if (!card) return;
+
+    const handleTouchMove = (event: TouchEvent) => {
+      if (dragRef.current?.active && event.cancelable) {
+        event.preventDefault();
+      }
+    };
+
+    const handleTouchEnd = (event: TouchEvent) => {
+      if (event.touches.length > 0) return;
+      const session = touchSessionRef.current;
+      touchSessionRef.current = null;
+      if (!session) return;
+
+      // Keep the focused segment and mobile virtual keyboard open after dragging or tapping card chrome.
+      const behavior = resolveTouchEndBehavior(session);
+      if (behavior.preventDefault && event.cancelable) {
+        event.preventDefault();
+        if (behavior.refocusUnit && !card.hasAttribute("data-disabled")) {
+          focusUnitWithoutScroll(behavior.refocusUnit);
+        }
+      }
+    };
+
+    const handleTouchCancel = () => {
+      touchSessionRef.current = null;
+    };
+
+    card.addEventListener("touchmove", handleTouchMove, { passive: false });
+    card.addEventListener("touchend", handleTouchEnd, { passive: false });
+    card.addEventListener("touchcancel", handleTouchCancel);
+
+    return () => {
+      card.removeEventListener("touchmove", handleTouchMove);
+      card.removeEventListener("touchend", handleTouchEnd);
+      card.removeEventListener("touchcancel", handleTouchCancel);
+    };
+  }, [focusUnitWithoutScroll]);
+
+  useEffect(() => {
     if (!sceneInteractive && dragRef.current) {
       endActiveDrag();
     }
@@ -452,9 +496,22 @@ export function AstroDatePicker({
     lastInputSourceRef.current = "pointer";
 
     const target = event.target as HTMLElement | null;
+    const isTouch = event.pointerType === "touch";
+    const focusedInside = isFocusedInside();
     const isLabel = Boolean(target?.closest('[data-slot="field-label"]'));
+
     if (isLabel) {
-      if (isFocusedInside()) {
+      if (isTouch) {
+        const activeUnit =
+          focusModeRef.current === "idle" ? getFirstEditableUnit() : focusModeRef.current;
+        touchSessionRef.current = {
+          startedOnCardChrome: true,
+          wasFocusedAtStart: focusedInside,
+          didDrag: false,
+          targetUnit: activeUnit,
+        };
+      }
+      if (focusedInside) {
         event.preventDefault();
       }
       return;
@@ -471,25 +528,37 @@ export function AstroDatePicker({
       clickedUnit ??
       (focusModeRef.current === "idle" ? getFirstEditableUnit() : focusModeRef.current);
 
+    if (isTouch) {
+      touchSessionRef.current = {
+        startedOnCardChrome: !isDateInput,
+        wasFocusedAtStart: focusedInside,
+        didDrag: false,
+        targetUnit: activeUnit,
+      };
+    }
+
     const renderer = rendererRef.current;
     const canDrag = renderer
       ? renderer.isModeInteractive(activeUnit)
       : focusModeRef.current === activeUnit;
 
     if (!isDateInput) {
-      // On desktop/pen, keep focus on the active segment for immediate keyboard control without page scroll.
-      // On touch, activate the 3D mode without forcing the mobile virtual keyboard to ambush the screen;
-      // tapping any date segment or the label still opens the numeric keypad natively.
-      if (event.pointerType !== "touch") {
+      if (isTouch) {
+        // Defer unfocused touch focus() to click so iOS Safari opens the virtual keyboard;
+        // when already focused, preventDefault stops blur so scrubbing never dismisses it.
+        if (focusedInside) {
+          event.preventDefault();
+        }
+      } else {
         event.preventDefault();
         focusUnitWithoutScroll(activeUnit);
-      } else if (isFocusedInside()) {
-        suppressNextBlurRef.current = true;
-        (document.activeElement as HTMLElement | null)?.blur();
+        setFocusMode(activeUnit);
       }
-      setFocusMode(activeUnit);
     }
-    renderer?.setMode(activeUnit);
+
+    if (!isTouch || activeUnit === focusModeRef.current) {
+      renderer?.setMode(activeUnit);
+    }
 
     if (readOnly || !canDrag) return;
 
@@ -546,6 +615,9 @@ export function AstroDatePicker({
         return;
       }
       drag.active = true;
+      if (touchSessionRef.current) {
+        touchSessionRef.current.didDrag = true;
+      }
       // Anchor drag origin here so the first active frame starts smoothly at 0px without a threshold jump
       drag.originX = event.clientX;
       setDragging(true);
@@ -554,16 +626,7 @@ export function AstroDatePicker({
       } catch {
         // Ignore if capture is disallowed in the current browsing context.
       }
-      if (drag.pointerType === "touch") {
-        // Dismiss mobile virtual keyboard & prevent iOS selection callouts while scrubbing the 3D scene
-        if (isFocusedInside()) {
-          suppressNextBlurRef.current = true;
-          (document.activeElement as HTMLElement | null)?.blur();
-        }
-        if (focusModeRef.current !== drag.unit) {
-          setFocusMode(drag.unit);
-        }
-      } else if (focusModeRef.current !== drag.unit) {
+      if (focusModeRef.current !== drag.unit) {
         setFocusMode(drag.unit);
         focusUnitWithoutScroll(drag.unit);
       }
@@ -615,12 +678,26 @@ export function AstroDatePicker({
     }
   };
 
-  const handleLabelMouseDown = (event: MouseEvent<HTMLLabelElement>) => {
+  const handleCardMouseDown = (event: MouseEvent<HTMLDivElement>) => {
     if (isFieldDisabled() || event.button !== 0) return;
+    const target = event.target as HTMLElement | null;
+    if (target?.closest('[data-slot="date-input"]')) return;
     if (isFocusedInside()) {
-      // Prevent mousedown on the non-focusable label from blurring the active segment.
       event.preventDefault();
     }
+  };
+
+  const handleCardClick = (event: MouseEvent<HTMLDivElement>) => {
+    if (isFieldDisabled() || isFocusedInside()) return;
+    const target = event.target as HTMLElement | null;
+    const segmentEl = target?.closest<HTMLElement>('[data-slot="date-input-segment"]');
+    const clickedType = segmentEl?.dataset.type;
+    const activeUnit: EditableDateUnit = isEditableUnit(clickedType)
+      ? clickedType
+      : focusModeRef.current === "idle"
+        ? getFirstEditableUnit()
+        : focusModeRef.current;
+    focusUnitWithoutScroll(activeUnit);
   };
 
   const handleLabelClick = (event: MouseEvent<HTMLLabelElement>) => {
@@ -658,6 +735,8 @@ export function AstroDatePicker({
       onPointerDownCapture={markPointerInput}
       onFocusCapture={handleFocusCapture}
       onBlur={handleBlur}
+      onMouseDown={handleCardMouseDown}
+      onClick={handleCardClick}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={finishDrag}
@@ -667,11 +746,7 @@ export function AstroDatePicker({
       <canvas ref={canvasRef} className={styles.canvas} />
       {skeletonMounted ? <AstroDatePickerSkeletonOverlay ready={assetsReady} /> : null}
       <div className={styles.scrim} aria-hidden="true" />
-      <FieldLabel
-        className={styles.label}
-        onMouseDown={handleLabelMouseDown}
-        onClick={handleLabelClick}
-      >
+      <FieldLabel className={styles.label} onClick={handleLabelClick}>
         {label}
       </FieldLabel>
       <DateInput

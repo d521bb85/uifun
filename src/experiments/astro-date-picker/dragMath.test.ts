@@ -8,6 +8,7 @@ import {
   getStepPxForUnit,
   isEditableUnit,
   MONTHS_PER_CARD_WIDTH,
+  resolveTouchEndBehavior,
   STEP_PX_BY_UNIT,
 } from "./dragMath";
 
@@ -135,5 +136,65 @@ describe("dragMath", () => {
     // Touch engages horizontal scrubbing when horizontal motion reaches threshold and dominates
     expect(classifyDragIntent(8, 3, "touch")).toBe("drag");
     expect(classifyDragIntent(-12, 8, "touch")).toBe("drag");
+  });
+
+  it("keeps the mobile keyboard open across touch taps and drags without blocking initial tap focus", () => {
+    // Unfocused tap on card chrome or label must not cancel click so iOS/Android open the keyboard
+    expect(
+      resolveTouchEndBehavior({
+        startedOnCardChrome: true,
+        wasFocusedAtStart: false,
+        didDrag: false,
+        targetUnit: "month",
+      }),
+    ).toEqual({ preventDefault: false, refocusUnit: null });
+
+    // Unfocused tap directly on a segment lets native input focus open the keyboard
+    expect(
+      resolveTouchEndBehavior({
+        startedOnCardChrome: false,
+        wasFocusedAtStart: false,
+        didDrag: false,
+        targetUnit: "day",
+      }),
+    ).toEqual({ preventDefault: false, refocusUnit: null });
+
+    // Touch drag on card body or starting on a segment suppresses post-drag blur/click
+    expect(
+      resolveTouchEndBehavior({
+        startedOnCardChrome: true,
+        wasFocusedAtStart: true,
+        didDrag: true,
+        targetUnit: "month",
+      }),
+    ).toEqual({ preventDefault: true, refocusUnit: null });
+    expect(
+      resolveTouchEndBehavior({
+        startedOnCardChrome: false,
+        wasFocusedAtStart: true,
+        didDrag: true,
+        targetUnit: "day",
+      }),
+    ).toEqual({ preventDefault: true, refocusUnit: null });
+
+    // Tapping card body or label while already focused prevents blur and keeps active segment focused
+    expect(
+      resolveTouchEndBehavior({
+        startedOnCardChrome: true,
+        wasFocusedAtStart: true,
+        didDrag: false,
+        targetUnit: "year",
+      }),
+    ).toEqual({ preventDefault: true, refocusUnit: "year" });
+
+    // Tapping another date segment while focused lets native focus transfer without dismissing keyboard
+    expect(
+      resolveTouchEndBehavior({
+        startedOnCardChrome: false,
+        wasFocusedAtStart: true,
+        didDrag: false,
+        targetUnit: "day",
+      }),
+    ).toEqual({ preventDefault: false, refocusUnit: null });
   });
 });

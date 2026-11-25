@@ -12,6 +12,28 @@ export const DAY_SNAP_THRESHOLD = 1;
 
 export type DragIntent = "pending" | "drag" | "cancel";
 
+export interface TouchSessionState {
+  startedOnCardChrome: boolean;
+  wasFocusedAtStart: boolean;
+  didDrag: boolean;
+  targetUnit: EditableDateUnit;
+}
+
+export interface TouchEndBehavior {
+  preventDefault: boolean;
+  refocusUnit: EditableDateUnit | null;
+}
+
+export function resolveTouchEndBehavior(session: TouchSessionState): TouchEndBehavior {
+  if (session.didDrag) {
+    return { preventDefault: true, refocusUnit: null };
+  }
+  if (session.startedOnCardChrome && session.wasFocusedAtStart) {
+    return { preventDefault: true, refocusUnit: session.targetUnit };
+  }
+  return { preventDefault: false, refocusUnit: null };
+}
+
 /**
  * Classifies pointer movement before a horizontal scrub engages:
  * - Mouse/pen: activates once |dx| reaches DRAG_THRESHOLD_PX.
