@@ -56,6 +56,10 @@ describe("cosmic astronomy engine", () => {
     expect(newMoon.lunar.earthshine).toBeGreaterThan(fullMoon.lunar.earthshine);
     expect(fullMoon.tidal.springNeapIndex).toBeGreaterThan(firstQuarter.tidal.springNeapIndex);
     expect(newMoon.tidal.springNeapIndex).toBeGreaterThan(firstQuarter.tidal.springNeapIndex);
+    // Nov 2026 Full Moon is near perigee (closer, larger apparent scale & stronger king tide)
+    // while Nov 2026 New Moon is near apogee
+    expect(fullMoon.lunar.apparentScale).toBeGreaterThan(newMoon.lunar.apparentScale);
+    expect(fullMoon.tidal.springNeapIndex).toBeGreaterThan(newMoon.tidal.springNeapIndex);
   });
 
   it("advances galactic epoch and axial precession monotonically across years", () => {

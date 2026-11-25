@@ -22,11 +22,13 @@ type EditableDateUnit = "year" | "month" | "day";
 
 const DRAG_THRESHOLD_PX = 5;
 const MONTHS_PER_CARD_WIDTH = 24;
+const DAYS_PER_CARD_WIDTH = 30;
 const MONTH_SNAP_THRESHOLD = 1;
+const DAY_SNAP_THRESHOLD = 1;
 const STEP_PX_BY_UNIT: Record<EditableDateUnit, number> = {
   year: 11,
   month: 460 / MONTHS_PER_CARD_WIDTH,
-  day: 9,
+  day: 460 / DAYS_PER_CARD_WIDTH,
 };
 
 function computeSnappedSteps(rawSteps: number, currentSteps: number, threshold: number): number {
@@ -94,6 +96,7 @@ export function CosmicDatePicker({
   const focusModeRef = useRef<CosmicFocusMode>("idle");
   const lastValidIsoRef = useRef(lastValidIso);
   const monthFractionRef = useRef(0);
+  const dayFractionRef = useRef(0);
 
   const dragRef = useRef<{
     pointerId: number;
@@ -177,6 +180,9 @@ export function CosmicDatePicker({
     if (focusMode !== "month") {
       monthFractionRef.current = 0;
     }
+    if (focusMode !== "day") {
+      dayFractionRef.current = 0;
+    }
     rendererRef.current?.setMode(focusMode);
   }, [focusMode]);
 
@@ -189,6 +195,10 @@ export function CosmicDatePicker({
       if (!dragRef.current?.active && focusModeRef.current === "month") {
         monthFractionRef.current = 0;
         rendererRef.current?.setMonthDragState(false, 0);
+      }
+      if (!dragRef.current?.active && focusModeRef.current === "day") {
+        dayFractionRef.current = 0;
+        rendererRef.current?.setDayDragState(false, 0);
       }
       setLastValidIso(next);
     }
@@ -238,6 +248,10 @@ export function CosmicDatePicker({
     } else {
       monthFractionRef.current = 0;
       rendererRef.current?.setMonthDragState(false, 0);
+    }
+    if (drag.unit === "day") {
+      dayFractionRef.current = 0;
+      rendererRef.current?.setDayDragState(false, 0);
     }
     dragRef.current = null;
   }, []);
@@ -298,14 +312,23 @@ export function CosmicDatePicker({
 
     const cardWidth = cardRef.current?.getBoundingClientRect().width || 460;
     const stepPx =
-      activeUnit === "month" ? cardWidth / MONTHS_PER_CARD_WIDTH : STEP_PX_BY_UNIT[activeUnit];
+      activeUnit === "month"
+        ? cardWidth / MONTHS_PER_CARD_WIDTH
+        : activeUnit === "day"
+          ? cardWidth / DAYS_PER_CARD_WIDTH
+          : STEP_PX_BY_UNIT[activeUnit];
 
     dragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
       originX: event.clientX,
       stepPx,
-      initialFraction: activeUnit === "month" ? monthFractionRef.current : 0,
+      initialFraction:
+        activeUnit === "month"
+          ? monthFractionRef.current
+          : activeUnit === "day"
+            ? dayFractionRef.current
+            : 0,
       appliedSteps: 0,
       baseIso: controller.getValue() ?? lastValidIsoRef.current,
       unit: activeUnit,
@@ -345,11 +368,13 @@ export function CosmicDatePicker({
     const nextSteps =
       drag.unit === "month"
         ? computeSnappedSteps(rawSteps, drag.appliedSteps, MONTH_SNAP_THRESHOLD)
-        : Math.trunc(rawSteps);
+        : drag.unit === "day"
+          ? computeSnappedSteps(rawSteps, drag.appliedSteps, DAY_SNAP_THRESHOLD)
+          : Math.trunc(rawSteps);
 
     if (nextSteps !== drag.appliedSteps) {
-      if (drag.unit === "month") {
-        // Step through adjacent months sequentially so WebGL neighbor deltas stay 100% continuous
+      if (drag.unit === "month" || drag.unit === "day") {
+        // Step through adjacent months/days sequentially so WebGL neighbor deltas stay 100% continuous
         const stepDir = Math.sign(nextSteps - drag.appliedSteps);
         while (drag.appliedSteps !== nextSteps) {
           drag.appliedSteps += stepDir;
@@ -365,7 +390,7 @@ export function CosmicDatePicker({
       const nextIso = addDateSegment(drag.baseIso, drag.unit, nextSteps, min, max);
       controller.setValue(nextIso);
       if (parseIsoDate(nextIso)) {
-        if (drag.unit !== "month") {
+        if (drag.unit !== "month" && drag.unit !== "day") {
           rendererRef.current?.setState(computeCosmicState(nextIso));
         }
         setLastValidIso(nextIso);
@@ -376,6 +401,10 @@ export function CosmicDatePicker({
       const nextFraction = rawSteps - nextSteps;
       monthFractionRef.current = nextFraction;
       rendererRef.current?.setMonthDragState(true, nextFraction);
+    } else if (drag.unit === "day") {
+      const nextFraction = rawSteps - nextSteps;
+      dayFractionRef.current = nextFraction;
+      rendererRef.current?.setDayDragState(true, nextFraction);
     }
   };
 

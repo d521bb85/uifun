@@ -260,33 +260,191 @@ void main() {
 }
 `;
 
-export const oceanVertexShader = /* glsl */ `
-uniform float uTime;
-uniform float uWaterLevel;
-uniform float uSwellEnergy;
-
-varying vec3 vWorldPos;
+export const moonHaloVertexShader = /* glsl */ `
 varying vec2 vUv;
-varying float vWaveHeight;
 
 void main() {
   vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+export const moonHaloFragmentShader = /* glsl */ `
+uniform float uOpacity;
+uniform float uMoonIllumination;
+
+varying vec2 vUv;
+
+void main() {
+  vec2 p = vUv * 2.0 - 1.0;
+  float r = length(p);
+  if (r > 1.0) discard;
+
+  // Soft atmospheric Mie/Rayleigh lunar scatter scaling naturally with illuminated fraction
+  float illum = pow(clamp(uMoonIllumination, 0.0001, 1.0), 1.15);
+  float innerGlow = exp(-r * 5.2) * (0.04 + 0.42 * illum);
+  float midHalo = exp(-r * 2.45) * (0.015 + 0.16 * illum);
+  float outerVeil = pow(max(1.0 - r, 0.0001), 2.8) * (0.008 + 0.07 * illum);
+
+  vec3 col =
+    vec3(0.84, 0.90, 1.0) * innerGlow +
+    vec3(0.46, 0.62, 0.88) * midHalo +
+    vec3(0.24, 0.38, 0.64) * outerVeil;
+
+  float alpha = clamp((innerGlow + midHalo + outerVeil) * uOpacity, 0.0, 1.0);
+  gl_FragColor = vec4(col * uOpacity, alpha);
+}
+`;
+
+export const lunarGuideVertexShader = /* glsl */ `
+varying vec2 vUv;
+
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+export const lunarGuideFragmentShader = /* glsl */ `
+uniform float uOpacity;
+uniform float uSynodicAge;
+uniform float uMoonClearInner;
+uniform float uMoonClearOuter;
+uniform float uHalfSpan;
+uniform float uDaySpacing;
+
+varying vec2 vUv;
+
+void main() {
+  float across = abs(vUv.y - 0.5) * 2.0;
+  float fwY = max(fwidth(across), 0.04);
+
+  float absAlong = abs(vUv.x);
+  // Crisp clearance gap around the Moon disc (scales dynamically with perigee/apogee diameter)
+  float moonClear = smoothstep(uMoonClearInner, uMoonClearOuter, absAlong);
+  float endFade = smoothstep(uHalfSpan, uHalfSpan * 0.28, absAlong);
+  if (moonClear * endFade < 0.002) discard;
+
+  float lineW = fwY * 0.55;
+  float hairline = 1.0 - smoothstep(lineW, lineW + fwY * 1.15, across);
+
+  // Perpendicular engineering graduations synced 1:1 with lunar synodic age:
+  // minor tick = 1 exact day, major tick = exact phase quarter (29.530588853 / 4 = 7.382647213d)
+  float dayCoord = vUv.x / uDaySpacing + uSynodicAge;
+  float fwDay = max(fwidth(dayCoord), 0.004);
+  float dayAA = smoothstep(0.28, 0.08, fwDay);
+  float dayTick = (1.0 - smoothstep(fwDay * 0.45, fwDay * 1.55, abs(fract(dayCoord + 0.5) - 0.5))) *
+    (1.0 - smoothstep(0.32, 0.32 + fwY * 1.2, across)) * dayAA;
+
+  float quarterCoord = dayCoord / 7.38264721325;
+  float fwQuarter = max(fwidth(quarterCoord), 0.002);
+  float quarterAA = smoothstep(0.28, 0.08, fwQuarter);
+  float quarterTick = (1.0 - smoothstep(fwQuarter * 0.5, fwQuarter * 1.6, abs(fract(quarterCoord + 0.5) - 0.5))) *
+    (1.0 - smoothstep(0.74, 0.74 + fwY * 1.2, across)) * quarterAA;
+
+  vec3 color = vec3(0.92, 0.94, 0.98);
+  float shape = max(hairline * 0.34, max(dayTick * 0.3, quarterTick * 0.54));
+  float alpha = clamp(shape * endFade * moonClear * uOpacity, 0.0, 1.0);
+  if (alpha < 0.003) discard;
+
+  gl_FragColor = vec4(color, alpha);
+}
+`;
+
+export const oceanVertexShader = /* glsl */ `
+uniform float uTime;
+uniform float uTideLevel;
+uniform float uSwellEnergy;
+
+varying vec3 vWorldPos;
+varying vec3 vLocalPos;
+varying vec2 vWaveSlope;
+varying float vWaveCrest;
+varying float vWaveHeight;
+
+float shoreCenterX(float z) {
+  float d = 1.0 - z;
+  float base = -0.46 + 0.35 * d + 0.0018 * d * d;
+  float cusps = 0.16 * sin(z * 0.42 + 0.6) + 0.085 * sin(z * 0.93 - 1.15);
+  return base + cusps;
+}
+
+float beachBedHeight(float s) {
+  float slope = s * 0.072;
+  float uBerm = max(s - 0.45, 0.0);
+  float upperBerm = 0.012 * uBerm * sqrt(uBerm);
+  float uDeep = max(-s - 2.2, 0.0);
+  float deepDrop = -0.018 * uDeep * (0.65 + 0.12 * uDeep);
+  return slope + upperBerm + deepDrop;
+}
+
+float evalOceanWaves(float sRel, float along, float t, float swellEnergy, out float crestOut) {
+  // Waves compress slightly and shoal as they approach the beach (sRel -> 0)
+  float shoalBoost = 1.0 + 0.42 * exp(-pow((sRel + 1.15) / 0.95, 2.0));
+  float shoreAtten = smoothstep(0.18, -0.58, sRel);
+  float amp = (0.024 + 0.048 * swellEnergy) * shoalBoost * shoreAtten;
+
+  // Primary long-period ocean swell rolling diagonally onto the beach
+  float p1 = sRel * 1.55 + along * 0.32 - t * 0.88 + 0.45 * sin(along * 0.24 - t * 0.18);
+  float w1 = (pow(max(0.5 + 0.5 * sin(p1), 0.0001), 1.6) - 0.42) * amp * 1.48;
+
+  // Secondary cross-swell creating natural wave sets
+  float p2 = sRel * 2.25 - along * 0.62 - t * 1.18;
+  float w2 = (pow(max(0.5 + 0.5 * sin(p2), 0.0001), 1.45) - 0.44) * amp * 0.62;
+
+  // Shorter wind swell
+  float p3 = sRel * 3.55 + along * 1.15 - t * 1.62;
+  float w3 = sin(p3) * amp * 0.24;
+
+  float total = w1 + w2 + w3;
+  // Breaking crest energy peaks in the shallow surf zone when swells crest
+  float breakerZone = exp(-pow((sRel + 1.05) / 0.85, 2.0));
+  crestOut = clamp((w1 / max(amp, 0.001) - 0.16) * 1.28, 0.0, 1.0) * breakerZone;
+  return total;
+}
+
+float sampleWaveAtXZ(float x, float z, float sEq, float t, float swellEnergy) {
+  float shoreX = shoreCenterX(z);
+  float s = (x - shoreX) * 0.946;
+  float along = z * 0.946 - x * 0.322;
+  float dummyCrest = 0.0;
+  return evalOceanWaves(s - sEq, along, t, swellEnergy, dummyCrest);
+}
+
+void main() {
   vec3 pos = position;
 
-  float distZ = max(0.0, -pos.z);
-  float horizonCurve = -0.0014 * (pos.x * pos.x) - 0.0008 * (distZ * distZ);
+  float shoreX = shoreCenterX(pos.z);
+  float s = (pos.x - shoreX) * 0.946;
+  float along = pos.z * 0.946 - pos.x * 0.322;
 
-  float amp = 0.018 + 0.042 * uSwellEnergy;
-  float w1 = sin(pos.x * 0.85 + pos.z * 0.62 + uTime * 0.9) * amp;
-  float w2 = sin(pos.x * -1.42 + pos.z * 1.18 + uTime * 1.25) * (amp * 0.5);
-  float w3 = cos(pos.x * 2.45 - pos.z * 1.95 + uTime * 1.65) * (amp * 0.24);
+  float tideBaseY = mix(-0.062, 0.068, uTideLevel);
+  float sEq = tideBaseY / 0.072;
+  float sRel = s - sEq;
 
-  float nearFade = smoothstep(24.0, 2.5, distZ);
-  float tideOffset = uWaterLevel * 0.34;
-  float wave = (w1 + w2 + w3) * nearFade;
+  float distZ = max(0.0, 2.0 - pos.z);
+  float nearFade = smoothstep(78.0, 10.0, distZ);
+  float horizonCurve = -0.000045 * max(distZ - 26.0, 0.0) * max(distZ - 26.0, 0.0);
 
-  pos.y += tideOffset + horizonCurve + wave;
-  vWaveHeight = wave;
+  float crest = 0.0;
+  float rawWaveH = evalOceanWaves(sRel, along, uTime, uSwellEnergy, crest);
+  float waveH = rawWaveH * nearFade;
+  float sandH = beachBedHeight(s);
+
+  // Smooth per-vertex macro swell slope for sculpted 3D rolling wave lighting
+  float eps = 0.09;
+  float wx = sampleWaveAtXZ(pos.x + eps, pos.z, sEq, uTime, uSwellEnergy);
+  float wz = sampleWaveAtXZ(pos.x, pos.z + eps, sEq, uTime, uSwellEnergy);
+  vWaveSlope = vec2((rawWaveH - wx) / eps, (rawWaveH - wz) / eps) * nearFade;
+
+  // Unified surface: seamless beach bed above water, continuous ocean surface over seabed
+  float waterY = tideBaseY + waveH;
+  float surfaceY = max(sandH, waterY) + horizonCurve;
+  pos.y = surfaceY;
+
+  vLocalPos = pos;
+  vWaveCrest = crest * nearFade;
+  vWaveHeight = waveH;
 
   vec4 worldPosition = modelMatrix * vec4(pos, 1.0);
   vWorldPos = worldPosition.xyz;
@@ -299,11 +457,14 @@ uniform float uTime;
 uniform vec3 uMoonDir;
 uniform float uMoonIllumination;
 uniform float uSwellEnergy;
-uniform float uWaterLevel;
+uniform float uTideLevel;
+uniform float uWetTideMemory;
 uniform float uOpacity;
 
 varying vec3 vWorldPos;
-varying vec2 vUv;
+varying vec3 vLocalPos;
+varying vec2 vWaveSlope;
+varying float vWaveCrest;
 varying float vWaveHeight;
 
 float hash(vec2 p) {
@@ -321,56 +482,327 @@ float noise(vec2 p) {
   );
 }
 
-// Fine anisotropic ocean ripples stretched horizontally like wind-driven sea swells
+float fbm(vec2 p) {
+  float v = 0.0;
+  float a = 0.5;
+  mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
+  for (int i = 0; i < 4; i++) {
+    v += a * noise(p);
+    p = rot * p * 2.04 + vec2(13.7, 7.3);
+    a *= 0.5;
+  }
+  return v;
+}
+
+// Lacy cellular seafoam pattern (interconnected thin filaments & fine bubbles)
+float foamLace(vec2 p, float t) {
+  vec2 q = p + vec2(fbm(p * 0.75 + vec2(t * 0.05, -t * 0.03)), fbm(p * 0.75 + vec2(5.2, 1.3))) * 0.45;
+  float n1 = fbm(q * 1.45);
+  float n2 = fbm(q * 3.6 - vec2(t * 0.06, 0.0));
+  float fine = noise(q * 11.5);
+  // Invert ridged noise into organic lacy foam strands
+  float web = 1.0 - abs(n1 * 2.0 - 1.0);
+  web = pow(clamp(web, 0.0001, 1.0), 2.4);
+  float cells = smoothstep(0.34, 0.78, n2 * 0.65 + fine * 0.35);
+  return clamp(web * 0.78 + cells * 0.42, 0.0, 1.0);
+}
+
+float shoreCenterX(float z) {
+  float d = 1.0 - z;
+  float base = -0.46 + 0.35 * d + 0.0018 * d * d;
+  float cusps = 0.16 * sin(z * 0.42 + 0.6) + 0.085 * sin(z * 0.93 - 1.15);
+  return base + cusps;
+}
+
+float beachBedHeight(float s) {
+  float slope = s * 0.072;
+  float uBerm = max(s - 0.45, 0.0);
+  float upperBerm = 0.012 * uBerm * sqrt(uBerm);
+  float uDeep = max(-s - 2.2, 0.0);
+  float deepDrop = -0.018 * uDeep * (0.65 + 0.12 * uDeep);
+  return slope + upperBerm + deepDrop;
+}
+
+// Asymmetric real coastal swash cycle: brisk uprush, soft apex hang, slower thinning backwash
+void swashCycle(float cyc, out float reach, out float vel, out float freshUprush) {
+  float c = fract(cyc);
+  if (c < 0.34) {
+    float u = c / 0.34;
+    float s = sin(u * 1.5707963);
+    reach = pow(max(s, 0.0001), 0.76);
+    vel = cos(u * 1.5707963);
+    freshUprush = smoothstep(0.0, 0.18, u) * (1.0 - smoothstep(0.75, 1.0, u));
+  } else if (c < 0.46) {
+    float u = (c - 0.34) / 0.12;
+    reach = 1.0 - 0.025 * u * u;
+    vel = -0.08 * u;
+    freshUprush = 0.15 * (1.0 - u);
+  } else {
+    float u = (c - 0.46) / 0.54;
+    reach = 0.975 * pow(max(cos(u * 1.5707963), 0.0001), 1.48);
+    vel = -sin(u * 1.5707963);
+    freshUprush = 0.0;
+  }
+}
+
+// Fine anisotropic ocean ripples stretched parallel to wave crests
 float waveField(vec2 p, float t) {
-  vec2 a = vec2(p.x * 0.72, p.y * 1.55);
+  vec2 a = vec2(p.x * 0.92, p.y * 1.52);
   float h = 0.0;
-  h += noise(a * 0.95 + vec2(t * 0.18, -t * 0.24)) * 0.44;
-  h += noise(a * 2.35 + vec2(-t * 0.28, t * 0.36)) * 0.28;
-  h += noise(a * 5.6 + vec2(t * 0.44, t * 0.58)) * 0.16;
-  h += noise(a * 12.8 + vec2(-t * 0.64, -t * 0.82)) * 0.08;
-  h += noise(a * 26.0 + vec2(t * 0.85, -t * 1.1)) * 0.04;
+  h += noise(a * 0.95 + vec2(-t * 0.24, t * 0.14)) * 0.44;
+  h += noise(a * 2.35 + vec2(-t * 0.36, -t * 0.22)) * 0.28;
+  h += noise(a * 5.6 + vec2(-t * 0.54, t * 0.34)) * 0.16;
+  h += noise(a * 12.8 + vec2(-t * 0.78, -t * 0.52)) * 0.08;
+  h += noise(a * 26.0 + vec2(-t * 1.05, t * 0.68)) * 0.04;
   return h;
 }
 
 void main() {
-  vec2 p = vWorldPos.xz;
-  float dist = length(cameraPosition - vWorldPos);
-  float eps = mix(0.032, 0.095, clamp(dist / 22.0, 0.0, 1.0));
+  vec2 xz = vLocalPos.xz;
+  float distCam = length(cameraPosition - vWorldPos);
+  float distZ = max(0.0, 2.0 - vLocalPos.z);
 
-  float h0 = waveField(p, uTime);
-  float hx = waveField(p + vec2(eps, 0.0), uTime);
-  float hz = waveField(p + vec2(0.0, eps), uTime);
+  float shoreX = shoreCenterX(vLocalPos.z);
+  float s = (vLocalPos.x - shoreX) * 0.946;
+  float along = vLocalPos.z * 0.946 - vLocalPos.x * 0.322;
 
-  float choppiness = (0.16 + 0.2 * uSwellEnergy) * mix(1.0, 0.55, clamp(dist / 20.0, 0.0, 1.0));
-  vec3 N = normalize(vec3((h0 - hx) / eps * choppiness, 1.0, (h0 - hz) / eps * choppiness));
+  float tideBaseY = mix(-0.062, 0.068, uTideLevel);
+  float sEq = tideBaseY / 0.072;
+  float sRel = s - sEq;
+
+  // Evaluate 3 overlapping organic coastal swash tongues along the diagonal beach
+  float swashDepth = 0.0;
+  float leadingFoam = 0.0;
+  float trailFoam = 0.0;
+  float meniscusRim = 0.0;
+  float meniscusSlope = 0.0;
+  float contactShadow = 0.0;
+
+  float periods[3];
+  periods[0] = 7.4;
+  periods[1] = 10.6;
+  periods[2] = 5.9;
+
+  float weights[3];
+  weights[0] = 1.0;
+  weights[1] = 0.86;
+  weights[2] = 0.68;
+
+  float phases[3];
+  phases[0] = 0.12;
+  phases[1] = 0.57;
+  phases[2] = 0.81;
+
+  for (int k = 0; k < 3; k++) {
+    float fk = float(k);
+    float alongWarp = fbm(vec2(along * 0.24 + fk * 3.7, fk * 2.1));
+    float cyc = uTime / periods[k] - along * (0.048 + 0.012 * fk) - alongWarp * 0.42 + phases[k];
+
+    float reach = 0.0;
+    float vel = 0.0;
+    float uprush = 0.0;
+    swashCycle(cyc, reach, vel, uprush);
+
+    // Smoothly evolving scalloped water tongues (continuous in time so edges never pop)
+    float scallopMacro = (fbm(vec2(along * 0.58 + fk * 5.3, uTime * 0.055 + fk * 1.7)) - 0.5) * 0.50;
+    float scallopMicro = (fbm(vec2(along * 2.15 - fk * 2.7, uTime * 0.095 + fk * 4.1)) - 0.5) * 0.17;
+    float scallop = (scallopMacro + scallopMicro) * (0.35 + 0.65 * reach);
+
+    float maxRunup = (0.58 + 0.64 * uSwellEnergy) * weights[k];
+    float edgeS = -0.36 + maxRunup * reach + scallop;
+    float distBehind = edgeS - sRel;
+
+    // Subtle micro contact shadow on the sand millimeter-ahead of an advancing liquid lip
+    float shadow = exp(-pow((distBehind + 0.008) / 0.016, 2.0)) * (0.35 + 0.65 * max(vel, 0.0));
+    contactShadow = max(contactShadow, shadow);
+
+    if (distBehind > -0.02) {
+      // Thin physical water film tapering smoothly into a curved liquid meniscus at distBehind = 0
+      float sheet = smoothstep(0.0, 0.26, distBehind) * (0.011 + 0.022 * reach * (0.42 + 0.58 * uSwellEnergy));
+      // Tiny raised bore lip right at the front of an advancing wave
+      float boreLip = exp(-pow((distBehind - 0.024) / 0.026, 2.0)) * (0.0034 + 0.0048 * uprush);
+      float layerDepth = sheet + boreLip * smoothstep(0.0, 0.012, distBehind);
+      swashDepth = max(swashDepth, layerDepth);
+
+      // Curved 3D bore-lip slope: front slopes down to sand, back faces Moon to catch specular glint
+      float lipSlope = -((distBehind - 0.024) / 0.024) * exp(-pow((distBehind - 0.024) / 0.024, 2.0)) * (0.42 + 0.58 * uprush);
+      if (abs(lipSlope) > abs(meniscusSlope)) {
+        meniscusSlope = lipSlope;
+      }
+
+      // Razor-thin specular meniscus right at the liquid boundary where the wave meets sand
+      float rim = exp(-pow((distBehind - 0.022) / 0.02, 2.0)) * (0.45 + 0.55 * max(vel, 0.0));
+      meniscusRim = max(meniscusRim, rim);
+
+      // Leading-edge lacy seafoam concentrated right along the advancing/stalling lip
+      float lipBand = smoothstep(-0.006, 0.016, distBehind) * exp(-max(distBehind - 0.014, 0.0) / (0.088 + 0.055 * uprush));
+      float lipStrength = (0.36 + 0.64 * smoothstep(-0.45, 0.55, vel)) * (0.55 + 0.45 * uSwellEnergy);
+      leadingFoam = max(leadingFoam, lipBand * lipStrength);
+
+      // Delicate gossamer trailing foam web dragged across the shallow water sheet
+      float trailBand = smoothstep(0.02, 0.14, distBehind) * exp(-max(distBehind - 0.12, 0.0) / 0.44);
+      float trailFade = 0.25 + 0.55 * reach;
+      trailFoam = max(trailFoam, trailBand * trailFade * (0.45 + 0.55 * uSwellEnergy));
+    }
+  }
+
+  // Smooth continuous wet-sand high-water reach envelope (never jumps between wave cycles)
+  float peakReachEnv = -0.24 + (0.58 + 0.64 * uSwellEnergy)
+    + (fbm(vec2(along * 0.52, uTime * 0.025)) - 0.5) * 0.34;
+
+  float sandH = beachBedHeight(s);
+  float deepDepth = max(0.0, (tideBaseY + vWaveHeight) - sandH);
+  float waterDepth = max(deepDepth, swashDepth);
+
+  // Distance attenuation for micro-detail to avoid shimmer near the far horizon
+  float detailFade = mix(1.0, 0.35, clamp(distCam / 26.0, 0.0, 1.0));
+  float eps = mix(0.024, 0.095, clamp(distCam / 28.0, 0.0, 1.0));
+
   vec3 V = normalize(cameraPosition - vWorldPos);
   vec3 L = normalize(uMoonDir);
+  float illumPow = pow(clamp(uMoonIllumination, 0.0001, 1.0), 0.85);
+  // Directional moonlight specular (glitter path & wet-sand glint) drops realistically near zero at New Moon,
+  // while cool starlight ambient keeps waves, foam edge, and beach delicately readable at all phases.
+  float moonSpecBright = 0.015 + 0.985 * illumPow;
+  float moonBright = 0.10 + 0.90 * illumPow;
+  vec3 moonColor = vec3(0.88, 0.93, 1.0);
+  vec3 starAmbient = vec3(0.085, 0.125, 0.195);
 
-  float fresnel = pow(1.0 - max(dot(N, V), 0.0), 4.6);
+  // ---------------- SAND & GLOSSY WET BEACH ----------------
+  // Wet sand envelope: recently washed swash zone + slower receding tidal memory
+  float wetMemoryExtra = max(uWetTideMemory - uTideLevel, 0.0) * 1.95;
+  float wetNoise = (fbm(vec2(along * 0.95, s * 1.4)) - 0.5) * 0.18;
+  float wetLimitS = peakReachEnv + 0.18 + wetMemoryExtra + wetNoise;
+  float wetness = smoothstep(wetLimitS + 0.28, wetLimitS - 0.08, sRel);
+  float dampness = smoothstep(wetLimitS + 0.92, wetLimitS - 0.05, sRel);
 
-  vec3 deepWater = vec3(0.006, 0.015, 0.034);
-  vec3 skyReflect = mix(vec3(0.022, 0.048, 0.098), vec3(0.11, 0.17, 0.29), 0.18 + 0.82 * uMoonIllumination);
-  vec3 color = mix(deepWater, skyReflect, clamp(fresnel * 0.85, 0.0, 1.0));
+  // Fine coastal sand micro-grain & subtle wet wave-wash undulations so reflections look organic, not plastic
+  float sandGrain1 = noise(xz * 18.0);
+  float sandGrain2 = noise(xz * 54.0 + 3.1);
+  float sandRipple = noise(vec2(along * 2.2, s * 6.5));
+  float wetMicro1 = noise(vec2(along * 5.2, s * 14.0)) - 0.5;
+  float wetMicro2 = noise(vec2(along * 15.0 + 2.3, s * 28.0)) - 0.5;
+  float slopeX = 0.072 * 0.946;
+  float slopeZ = 0.072 * 0.322;
+  vec3 sandN = normalize(vec3(
+    -slopeX + ((sandGrain1 - 0.5) * 0.055 * (1.0 - wetness * 0.62) + (wetMicro1 * 0.042 + wetMicro2 * 0.022) * wetness) * detailFade,
+    1.0,
+    -slopeZ + ((sandGrain2 - 0.5) * 0.055 * (1.0 - wetness * 0.62) + (wetMicro2 * 0.038 - wetMicro1 * 0.024) * wetness) * detailFade
+  ));
 
-  vec3 H = normalize(L + V);
-  float ndh = max(dot(N, H), 0.0);
-  float moonBright = 0.06 + 0.94 * pow(uMoonIllumination, 0.9);
-  float glitterPin = pow(ndh, 420.0) * 2.8;
-  float glitterMid = pow(ndh, 78.0) * 0.55;
-  float glitterWide = pow(ndh, 16.0) * 0.1;
-  vec3 moonColor = vec3(0.86, 0.92, 1.0);
-  color += moonColor * (glitterPin + glitterMid + glitterWide) * moonBright;
+  // Dark coastal sand palette calibrated for ACESFilmic + sRGB + corner scrim readability
+  vec3 drySandAlbedo = vec3(0.076, 0.082, 0.098) * (0.85 + 0.30 * sandRipple) + (sandGrain2 - 0.5) * 0.010;
+  vec3 wetSandAlbedo = drySandAlbedo * vec3(0.46, 0.51, 0.62);
+  vec3 sandAlbedo = mix(drySandAlbedo, wetSandAlbedo, clamp(wetness * 0.85 + dampness * 0.35, 0.0, 1.0));
 
-  float crest = smoothstep(0.022, 0.056, vWaveHeight) * uSwellEnergy * (0.3 + 0.7 * moonBright);
-  color += vec3(0.18, 0.28, 0.44) * crest * 0.28;
+  float sandNdl = max(dot(sandN, L), 0.0);
+  vec3 sandDiffuse = sandAlbedo * (starAmbient * 1.55 + moonColor * (0.30 + 1.10 * sandNdl) * moonBright);
 
-  float horizonFade = smoothstep(0.0, 0.16, vUv.y) * smoothstep(1.0, 0.72, vUv.y);
-  float edgeFade = smoothstep(0.0, 0.1, vUv.x) * smoothstep(1.0, 0.9, vUv.x);
-  float horizonMist = exp(-pow((vUv.y - 0.84) / 0.11, 2.0)) * (0.04 + 0.09 * moonBright + 0.05 * (uWaterLevel * 0.5 + 0.5));
-  color += vec3(0.16, 0.28, 0.48) * horizonMist;
+  // Silky Fresnel sheen on freshly washed wet sand (reflects Moon & night sky with organic sand micro-texture)
+  float sandFresnel = pow(clamp(1.0 - max(dot(sandN, V), 0.0), 0.0001, 1.0), 3.6);
+  vec3 skyGrad = mix(vec3(0.036, 0.062, 0.112), vec3(0.145, 0.228, 0.365), 0.16 + 0.84 * uMoonIllumination);
+  vec3 sandHalfVec = normalize(L + V);
+  float sandNdh = max(dot(sandN, sandHalfVec), 0.0001);
+  // Subtle broken specular reflection on damp/wet sand directly under the Moon
+  float wetSpecBreakup = 0.72 + 0.42 * noise(vec2(along * 3.8, s * 9.5));
+  float wetMoonSpec = (pow(sandNdh, 140.0) * 0.92 + pow(sandNdh, 26.0) * 0.24) * moonSpecBright * wetSpecBreakup;
+  float dampMoonSpec = pow(sandNdh, 16.0) * 0.085 * moonSpecBright;
+  vec3 wetReflect = skyGrad * (0.14 + 0.74 * sandFresnel) + moonColor * wetMoonSpec;
 
-  gl_FragColor = vec4(color, horizonFade * edgeFade * uOpacity);
+  vec3 sandColor = sandDiffuse
+    + wetReflect * wetness * 0.86
+    + (skyGrad * 0.14 + moonColor * dampMoonSpec) * dampness * (1.0 - wetness);
+  // Crisp micro contact darkening right ahead of the advancing liquid lip
+  sandColor *= 1.0 - contactShadow * 0.28;
+
+  // ---------------- OCEAN WATER & SWASH FILM ----------------
+  // Anisotropic wave ripples attenuate gracefully in ultra-thin swash film
+  float rippleScale = mix(0.28, 1.0, smoothstep(0.002, 0.06, waterDepth));
+  float h0 = waveField(xz, uTime);
+  float hx = waveField(xz + vec2(eps, 0.0), uTime);
+  float hz = waveField(xz + vec2(0.0, eps), uTime);
+
+  float choppiness = (0.14 + 0.19 * uSwellEnergy) * rippleScale * mix(1.0, 0.45, clamp(distCam / 26.0, 0.0, 1.0));
+  // Combine sculpted macro swell slopes + capillary ripples + curved swash meniscus lip
+  vec2 meniscusTilt = vec2(0.946, 0.322) * meniscusSlope * 0.36;
+  vec2 macroSlope = vWaveSlope * smoothstep(0.004, 0.075, waterDepth) * 1.45;
+  vec3 waterN = normalize(vec3(
+    macroSlope.x + (h0 - hx) / eps * choppiness + meniscusTilt.x,
+    1.0,
+    macroSlope.y + (h0 - hz) / eps * choppiness + meniscusTilt.y
+  ));
+
+  // Physical Schlick Fresnel for water (F0 = 0.02)
+  float ndv = max(dot(waterN, V), 0.0);
+  float fresnel = 0.02 + 0.98 * pow(clamp(1.0 - ndv, 0.0001, 1.0), 4.6);
+
+  // Beer-Lambert shallow water transmittance: thin swash reveals darkened wet sand underneath
+  float transmittance = exp(-waterDepth * 38.0);
+  vec3 deepWaterCol = vec3(0.007, 0.017, 0.038);
+  vec3 shallowTint = vec3(0.014, 0.034, 0.062);
+  vec3 waterBody = mix(deepWaterCol, shallowTint, smoothstep(0.18, 0.01, waterDepth));
+  vec3 underWater = mix(waterBody, sandColor * 0.78, transmittance * 0.86);
+
+  vec3 waterColor = mix(underWater, skyGrad, clamp(fresnel * 0.84, 0.0, 1.0));
+
+  // Multi-lobe anisotropic moonlight glitter path across waves & thin swash
+  vec3 waterH = normalize(L + V);
+  float ndh = max(dot(waterN, waterH), 0.0001);
+  float glitterPin = pow(ndh, 380.0) * 3.5;
+  float glitterMid = pow(ndh, 76.0) * 0.66;
+  float glitterWide = pow(ndh, 15.0) * 0.14;
+  // Soften pin-glitter slightly in smooth glassy swash film while keeping meniscus highlight crisp
+  float glitterMask = mix(0.65, 1.0, rippleScale);
+  waterColor += moonColor * (glitterPin * glitterMask + glitterMid + glitterWide) * moonSpecBright;
+  waterColor += moonColor * meniscusRim * (0.12 + 0.58 * moonSpecBright) * (0.35 + 0.65 * pow(ndh, 10.0));
+
+  // Subtle moonlit translucency / subsurface glow on shoaling wave crests
+  float sssCrest = smoothstep(0.014, 0.052, vWaveHeight) * (0.28 + 0.72 * uSwellEnergy) * (0.22 + 0.78 * moonBright);
+  waterColor += vec3(0.12, 0.24, 0.40) * sssCrest * 0.40;
+
+  // ---------------- LACY SEAFOAM & SHOREBREAK ----------------
+  vec2 foamUv = vec2(along * 1.15, sRel * 2.1);
+  float lace = foamLace(foamUv, uTime);
+  float fineBubbles = noise(foamUv * 9.5 + vec2(uTime * 0.08, 0.0));
+
+  // 1) Crisp lacy foam along the swash leading edge where the wave ends on sand
+  float edgeFoamMask = leadingFoam * smoothstep(0.12, 0.72, lace * 0.8 + fineBubbles * 0.25);
+  // Continuous ultra-thin bubbly rim right at the very lip of an advancing wave
+  float rimSpark = leadingFoam * smoothstep(0.28, 0.82, leadingFoam + fineBubbles * 0.28) * 0.58;
+
+  // 2) Gossamer trailing foam lace across the shallow swash sheet
+  float trailFoamMask = trailFoam * smoothstep(0.42, 0.86, lace) * 0.66;
+
+  // 3) Soft shorebreak whitewater on shoaling crests in the surf zone
+  float breakerNoise = foamLace(vec2(along * 0.85, sRel * 1.35) + vec2(0.0, -uTime * 0.12), uTime);
+  float breakerFoam = vWaveCrest * (0.35 + 0.65 * uSwellEnergy) * smoothstep(0.24, 0.76, breakerNoise) * 0.82;
+
+  float totalFoam = clamp(max(max(edgeFoamMask, rimSpark), max(trailFoamMask, breakerFoam)), 0.0, 1.0);
+  // Foam dims gracefully toward the far horizon to prevent pixel noise
+  totalFoam *= mix(1.0, 0.26, clamp(distCam / 32.0, 0.0, 1.0));
+
+  // Realistic nocturnal foam color (cool starlit slate in New Moon -> bright silver-white in Full Moon)
+  vec3 foamLit = starAmbient * 1.55 + moonColor * (0.14 + 0.90 * moonSpecBright);
+  // Subtle lunar specular sheen on fresh foam bubbles
+  foamLit += moonColor * pow(ndh, 24.0) * 0.28 * moonSpecBright;
+  waterColor = mix(waterColor, foamLit, totalFoam * 0.88);
+
+  // Smooth, sub-pixel anti-aliased water-to-sand boundary (zero hard seams!)
+  float waterMask = smoothstep(0.0003, 0.0052, waterDepth);
+  // Allow delicate dry-edge foam wisps right at the very front of the meniscus
+  float lipFoamOverSand = clamp(edgeFoamMask * 0.55, 0.0, 1.0) * (1.0 - waterMask);
+  vec3 finalColor = mix(sandColor, waterColor, waterMask);
+  finalColor = mix(finalColor, foamLit * 0.85, lipFoamOverSand);
+
+  // Atmospheric night marine haze blending the distant ocean softly into the dark starry horizon
+  float horizonBlend = smoothstep(22.0, 104.0, distZ);
+  vec3 horizonSky = mix(vec3(0.005, 0.010, 0.022), vec3(0.018, 0.032, 0.056), 0.14 + 0.86 * uMoonIllumination);
+  float horizonGlow = exp(-pow((distZ - 58.0) / 30.0, 2.0)) * (0.014 + 0.042 * moonSpecBright);
+  finalColor = mix(finalColor, horizonSky, horizonBlend * 0.94) + vec3(0.12, 0.21, 0.36) * horizonGlow;
+
+  // Feather extreme far edge smoothly into skybox so there is never a harsh razor horizon step
+  float farAlpha = smoothstep(114.0, 62.0, distZ);
+  gl_FragColor = vec4(finalColor, farAlpha * uOpacity);
 }
 `;
 
@@ -467,6 +899,9 @@ attribute float aPhase;
 uniform float uPixelRatio;
 uniform float uTime;
 uniform float uSizeScale;
+uniform float uHorizonClip;
+uniform vec3 uMoonDir;
+uniform float uMoonIllum;
 
 varying vec3 vColor;
 varying float vTwinkle;
@@ -475,7 +910,18 @@ void main() {
   vColor = aColor;
   float speed = 0.85 + fract(aPhase * 0.37) * 1.65;
   float shimmer = 0.62 * sin(uTime * speed + aPhase) + 0.38 * sin(uTime * speed * 1.73 + aPhase * 2.1);
-  vTwinkle = 0.8 + 0.24 * shimmer;
+
+  // In coastal Day mode, apply natural horizon atmospheric extinction and subtle lunar skyglow dimming
+  vec3 worldDir = normalize(mat3(modelMatrix) * position);
+  float horizonVis = smoothstep(-0.015, 0.09, worldDir.y);
+  float moonCos = max(dot(worldDir, normalize(uMoonDir)), 0.0001);
+  float nearMoonVeil = 1.0 - pow(moonCos, 28.0) * 0.72 * uMoonIllum;
+  // Bright 1st-magnitude stars pierce Full Moon skyglow while faint stars dim realistically
+  float faintness = 1.0 - smoothstep(2.1, 4.4, aSize);
+  float globalMoonDim = mix(1.0, 0.8, uMoonIllum * (0.24 + 0.76 * faintness));
+  float coastalVis = mix(1.0, horizonVis * nearMoonVeil * globalMoonDim, uHorizonClip);
+
+  vTwinkle = (0.8 + 0.24 * shimmer) * coastalVis;
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
   gl_PointSize = clamp(aSize * uPixelRatio * uSizeScale, 1.15 * uPixelRatio, 9.5 * uPixelRatio);
   gl_Position = projectionMatrix * mvPosition;

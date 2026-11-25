@@ -1,5 +1,10 @@
 import * as THREE from "three";
-import { addDateSegment, type CosmicState, computeCosmicState } from "./astronomy";
+import {
+  addDateSegment,
+  type CosmicState,
+  computeCosmicState,
+  SYNODIC_MONTH_DAYS,
+} from "./astronomy";
 import {
   atmosphereFragmentShader,
   atmosphereVertexShader,
@@ -10,7 +15,11 @@ import {
   galacticGuideFragmentShader,
   galacticGuideVertexShader,
   galacticStreamVertexShader,
+  lunarGuideFragmentShader,
+  lunarGuideVertexShader,
   moonFragmentShader,
+  moonHaloFragmentShader,
+  moonHaloVertexShader,
   moonVertexShader,
   oceanFragmentShader,
   oceanVertexShader,
@@ -39,6 +48,17 @@ const CAROUSEL_EARTH_SCALE = 1.0;
 const J2000_OBLIQUITY_RAD = THREE.MathUtils.degToRad(23.43929111);
 const TWO_PI = Math.PI * 2;
 
+const DAY_STAGE_Y = -18;
+const DAY_MOON_BASE_RADIUS = 0.5;
+const DAY_MOON_POS = new THREE.Vector3(-0.06, 2.38, -3.6);
+const DAY_CAM_LOCAL_POS = new THREE.Vector3(0.0, 1.28, 4.6);
+const DAY_CAM_LOCAL_TARGET = new THREE.Vector3(0.0, 1.18, -4.0);
+const DAY_MOON_DIR = DAY_MOON_POS.clone().sub(DAY_CAM_LOCAL_POS).normalize();
+const DAY_GUIDE_HALF_SPAN = 4.2;
+const DAY_GUIDE_DAY_SPACING = 0.215;
+const TIDE_DEBOUNCE_SEC = 0.4;
+const TIDE_RELEASE_SETTLE_SEC = 0.12;
+
 // Hero (idle) framing: Earth fills the left corner (~1/3 of the card) with static Sun upper-right
 // and the Moon orbiting honestly across its true 360° geocentric ecliptic path.
 const HERO_RIG = {
@@ -65,12 +85,6 @@ function damp(current: number, target: number, lambda: number, dt: number): numb
   return THREE.MathUtils.lerp(current, target, 1 - Math.exp(-lambda * dt));
 }
 
-function dampAngle(current: number, target: number, lambda: number, dt: number): number {
-  let diff = ((target - current + Math.PI) % TWO_PI) - Math.PI;
-  if (diff < -Math.PI) diff += TWO_PI;
-  return current + diff * (1 - Math.exp(-lambda * dt));
-}
-
 function unwrapAngleNear(angle: number, reference: number): number {
   let diff = ((angle - reference + Math.PI) % TWO_PI) - Math.PI;
   if (diff < -Math.PI) diff += TWO_PI;
@@ -80,6 +94,13 @@ function unwrapAngleNear(angle: number, reference: number): number {
 function shortestAngleDelta(from: number, to: number): number {
   let diff = ((to - from + Math.PI) % TWO_PI) - Math.PI;
   if (diff < -Math.PI) diff += TWO_PI;
+  return diff;
+}
+
+function shortestCycleDelta(from: number, to: number, period: number): number {
+  const half = period * 0.5;
+  let diff = ((to - from + half) % period) - half;
+  if (diff < -half) diff += period;
   return diff;
 }
 
@@ -118,6 +139,9 @@ export class CosmicSceneRenderer {
     uTime: { value: number };
     uSizeScale: { value: number };
     uOpacity: { value: number };
+    uHorizonClip: { value: number };
+    uMoonDir: { value: THREE.Vector3 };
+    uMoonIllum: { value: number };
   };
 
   private readonly galacticDustGroup: THREE.Group;
@@ -187,6 +211,11 @@ export class CosmicSceneRenderer {
   };
 
   private readonly dayStageGroup: THREE.Group;
+  private readonly moonHaloMesh: THREE.Mesh;
+  private readonly moonHaloUniforms: {
+    uOpacity: { value: number };
+    uMoonIllumination: { value: number };
+  };
   private readonly moonMesh: THREE.Mesh;
   private readonly moonUniforms: {
     uMoonMap: { value: THREE.Texture };
@@ -194,10 +223,20 @@ export class CosmicSceneRenderer {
     uEarthshine: { value: number };
     uOpacity: { value: number };
   };
+  private readonly lunarGuideMesh: THREE.Mesh;
+  private readonly lunarGuideUniforms: {
+    uOpacity: { value: number };
+    uSynodicAge: { value: number };
+    uMoonClearInner: { value: number };
+    uMoonClearOuter: { value: number };
+    uHalfSpan: { value: number };
+    uDaySpacing: { value: number };
+  };
   private readonly oceanMesh: THREE.Mesh;
   private readonly oceanUniforms: {
     uTime: { value: number };
-    uWaterLevel: { value: number };
+    uTideLevel: { value: number };
+    uWetTideMemory: { value: number };
     uSwellEnergy: { value: number };
     uMoonDir: { value: THREE.Vector3 };
     uMoonIllumination: { value: number };
@@ -245,6 +284,28 @@ export class CosmicSceneRenderer {
   private prevMoonLonDelta = -TWO_PI;
   private nextMoonLat = 0;
   private prevMoonLat = 0;
+
+  private dayDragging = false;
+  private dragDayFraction = 0;
+  private nextDayIso = "";
+  private prevDayIso = "";
+  private nextDayElongDelta = TWO_PI / SYNODIC_MONTH_DAYS;
+  private prevDayElongDelta = -TWO_PI / SYNODIC_MONTH_DAYS;
+  private nextDayAgeDelta = 1;
+  private prevDayAgeDelta = -1;
+  private nextDayLat = 0;
+  private prevDayLat = 0;
+  private nextDayScale = 1;
+  private prevDayScale = 1;
+  private nextDayIllum = 0.5;
+  private prevDayIllum = 0.5;
+  private nextDayEarthshine = 0.25;
+  private prevDayEarthshine = 0.25;
+  private nextDayLibLon = 0;
+  private prevDayLibLon = 0;
+  private nextDayLibLat = 0;
+  private prevDayLibLat = 0;
+
   private smoothOrbitRadius: number;
   private targetSpinAngle: number;
   private smoothSpinAngle: number;
@@ -253,11 +314,28 @@ export class CosmicSceneRenderer {
   private smoothMoonLat: number;
   private smoothMoonOrbitRadius: number;
   private smoothEarthScale = 1;
+
+  private targetDayElong: number;
   private smoothMoonElong: number;
+  private targetDayAge: number;
+  private smoothDayAge: number;
+  private smoothDayLat: number;
+  private smoothDayLibLon: number;
+  private smoothDayLibLat: number;
   private smoothMoonIllum: number;
+  private smoothMoonEarthshine: number;
   private smoothMoonScale: number;
-  private smoothWaterLevel: number;
+
+  // Debounced, slowly damped coastal tidal state (spring/neap + perigean/apogean)
+  private pendingTideLevel: number;
+  private pendingSwellEnergy: number;
+  private committedTideLevel: number;
+  private committedSwellEnergy: number;
+  private tideDebounceRemaining = 0;
+  private smoothTideLevel: number;
+  private smoothWetTideMemory: number;
   private smoothSwellEnergy: number;
+
   private smoothEpochYears: number;
   private smoothPrecession: number;
 
@@ -277,6 +355,7 @@ export class CosmicSceneRenderer {
   private wGalactic = 0;
   private wMonthGuide = 0;
   private wYearGuide = 0;
+  private wDayGuide = 0;
   private smoothSkyBright = 0.48;
   private smoothSkyGamma = 0.84;
   private smoothSkyReveal = 0.16;
@@ -295,14 +374,30 @@ export class CosmicSceneRenderer {
     this.smoothMoonLat = initialState.lunar.latitudeRad;
     this.smoothMoonOrbitRadius =
       HERO_MOON_ORBIT_RADIUS * (initialState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM);
+
+    this.targetDayElong = initialState.lunar.elongationRad;
     this.smoothMoonElong = initialState.lunar.elongationRad;
+    this.targetDayAge = initialState.lunar.synodicAgeDays;
+    this.smoothDayAge = initialState.lunar.synodicAgeDays;
+    this.smoothDayLat = initialState.lunar.latitudeRad;
+    this.smoothDayLibLon = initialState.lunar.librationLonRad;
+    this.smoothDayLibLat = initialState.lunar.librationLatRad;
     this.smoothMoonIllum = initialState.lunar.illumination;
+    this.smoothMoonEarthshine = initialState.lunar.earthshine;
     this.smoothMoonScale = initialState.lunar.apparentScale;
-    this.smoothWaterLevel = initialState.tidal.waterLevel;
+
+    this.pendingTideLevel = initialState.tidal.springNeapIndex;
+    this.pendingSwellEnergy = initialState.tidal.swellEnergy;
+    this.committedTideLevel = initialState.tidal.springNeapIndex;
+    this.committedSwellEnergy = initialState.tidal.swellEnergy;
+    this.smoothTideLevel = initialState.tidal.springNeapIndex;
+    this.smoothWetTideMemory = initialState.tidal.springNeapIndex;
     this.smoothSwellEnergy = initialState.tidal.swellEnergy;
+
     this.smoothEpochYears = initialState.galactic.epochYearsSinceJ2000;
     this.smoothPrecession = initialState.galactic.axialPrecessionRad;
     this.updateMonthNeighbors();
+    this.updateDayNeighbors();
 
     this.renderer = new THREE.WebGLRenderer({
       canvas,
@@ -515,9 +610,29 @@ export class CosmicSceneRenderer {
     this.scene.add(this.earthOrbitRoot);
 
     this.dayStageGroup = new THREE.Group();
-    this.dayStageGroup.position.set(0, -18, 0);
+    this.dayStageGroup.position.set(0, DAY_STAGE_Y, 0);
 
-    const moonGeo = new THREE.SphereGeometry(0.5, 72, 72);
+    const moonHaloGeo = new THREE.PlaneGeometry(3.8, 3.8);
+    this.geometries.push(moonHaloGeo);
+    this.moonHaloUniforms = {
+      uOpacity: { value: 0 },
+      uMoonIllumination: { value: initialState.lunar.illumination },
+    };
+    const moonHaloMaterial = new THREE.ShaderMaterial({
+      vertexShader: moonHaloVertexShader,
+      fragmentShader: moonHaloFragmentShader,
+      uniforms: this.moonHaloUniforms,
+      transparent: true,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this.materials.push(moonHaloMaterial);
+    this.moonHaloMesh = new THREE.Mesh(moonHaloGeo, moonHaloMaterial);
+    this.moonHaloMesh.position.set(DAY_MOON_POS.x, DAY_MOON_POS.y, DAY_MOON_POS.z - 0.14);
+    this.moonHaloMesh.renderOrder = 3;
+    this.dayStageGroup.add(this.moonHaloMesh);
+
+    const moonGeo = new THREE.SphereGeometry(DAY_MOON_BASE_RADIUS, 72, 72);
     this.geometries.push(moonGeo);
     this.moonUniforms = {
       uMoonMap: { value: moonAlbedoMap },
@@ -533,19 +648,24 @@ export class CosmicSceneRenderer {
     });
     this.materials.push(moonMaterial);
     this.moonMesh = new THREE.Mesh(moonGeo, moonMaterial);
-    this.moonMesh.position.set(-0.24, 0.66, 0);
+    this.moonMesh.position.copy(DAY_MOON_POS);
     // Orient lunar near-side facing the observer
     this.moonMesh.rotation.y = -Math.PI * 0.5;
+    this.moonMesh.renderOrder = 4;
     this.dayStageGroup.add(this.moonMesh);
 
-    const oceanGeo = new THREE.PlaneGeometry(24, 24, 112, 112);
-    oceanGeo.rotateX(-Math.PI * 0.5);
-    this.geometries.push(oceanGeo);
+    const { mesh: lunarGuideMesh, uniforms: lunarGuideUniforms } = this.createLunarGuide();
+    this.lunarGuideMesh = lunarGuideMesh;
+    this.lunarGuideUniforms = lunarGuideUniforms;
+    this.dayStageGroup.add(this.lunarGuideMesh);
+
+    const oceanGeo = this.createCoastalGeometry();
     this.oceanUniforms = {
       uTime: { value: 0 },
-      uWaterLevel: { value: initialState.tidal.waterLevel },
+      uTideLevel: { value: initialState.tidal.springNeapIndex },
+      uWetTideMemory: { value: initialState.tidal.springNeapIndex },
       uSwellEnergy: { value: initialState.tidal.swellEnergy },
-      uMoonDir: { value: new THREE.Vector3(-0.08, 0.34, -0.94).normalize() },
+      uMoonDir: { value: DAY_MOON_DIR.clone() },
       uMoonIllumination: { value: initialState.lunar.illumination },
       uOpacity: { value: 0 },
     };
@@ -555,10 +675,11 @@ export class CosmicSceneRenderer {
       uniforms: this.oceanUniforms,
       transparent: true,
       depthWrite: false,
+      side: THREE.DoubleSide,
     });
     this.materials.push(oceanMaterial);
     this.oceanMesh = new THREE.Mesh(oceanGeo, oceanMaterial);
-    this.oceanMesh.position.set(0, -0.82, -6.2);
+    this.oceanMesh.renderOrder = 2;
     this.dayStageGroup.add(this.oceanMesh);
 
     this.scene.add(this.dayStageGroup);
@@ -659,6 +780,9 @@ export class CosmicSceneRenderer {
       uTime: { value: 0 },
       uSizeScale: { value: 1 },
       uOpacity: { value: 0.96 },
+      uHorizonClip: { value: 0 },
+      uMoonDir: { value: DAY_MOON_DIR.clone() },
+      uMoonIllum: { value: this.cosmicState.lunar.illumination },
     };
 
     const material = new THREE.ShaderMaterial({
@@ -870,6 +994,132 @@ export class CosmicSceneRenderer {
     return { mesh, uniforms };
   }
 
+  private createLunarGuide() {
+    const segments = 160;
+    const halfSpan = DAY_GUIDE_HALF_SPAN;
+    const halfW = 0.088;
+    const positions = new Float32Array((segments + 1) * 2 * 3);
+    const uvs = new Float32Array((segments + 1) * 2 * 2);
+    const indices: number[] = [];
+
+    for (let i = 0; i <= segments; i += 1) {
+      const s = -halfSpan + (i / segments) * halfSpan * 2;
+      // Subtle ecliptic arc passing horizontally through the Moon's center
+      const cx = s;
+      const cy = -0.0085 * s * s;
+      const cz = 0;
+
+      const tx = 1;
+      const ty = -0.017 * s;
+      const sideLen = Math.hypot(ty, tx) || 1;
+      const sx = (ty / sideLen) * halfW;
+      const sy = (-tx / sideLen) * halfW;
+
+      const v0 = i * 2;
+      const v1 = v0 + 1;
+      positions[v0 * 3] = cx - sx;
+      positions[v0 * 3 + 1] = cy - sy;
+      positions[v0 * 3 + 2] = cz;
+
+      positions[v1 * 3] = cx + sx;
+      positions[v1 * 3 + 1] = cy + sy;
+      positions[v1 * 3 + 2] = cz;
+
+      uvs[v0 * 2] = s;
+      uvs[v0 * 2 + 1] = 0;
+      uvs[v1 * 2] = s;
+      uvs[v1 * 2 + 1] = 1;
+
+      if (i < segments) {
+        const next0 = v0 + 2;
+        const next1 = v0 + 3;
+        indices.push(v0, v1, next0, v1, next1, next0);
+      }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+    this.geometries.push(geometry);
+
+    const uniforms = {
+      uOpacity: { value: 0 },
+      uSynodicAge: { value: this.smoothDayAge },
+      uMoonClearInner: { value: DAY_MOON_BASE_RADIUS * 1.16 },
+      uMoonClearOuter: { value: DAY_MOON_BASE_RADIUS * 1.56 },
+      uHalfSpan: { value: halfSpan },
+      uDaySpacing: { value: DAY_GUIDE_DAY_SPACING },
+    };
+
+    const material = new THREE.ShaderMaterial({
+      vertexShader: lunarGuideVertexShader,
+      fragmentShader: lunarGuideFragmentShader,
+      uniforms,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.materials.push(material);
+
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.position.copy(DAY_MOON_POS);
+    mesh.renderOrder = 6;
+    mesh.visible = false;
+    return { mesh, uniforms };
+  }
+
+  private createCoastalGeometry() {
+    // Non-uniform coastal mesh concentrating vertex density in the foreground swash & surf zone
+    // while extending cleanly out to the distant oceanic horizon (z = -115)
+    const segX = 180;
+    const segZ = 156;
+    const cols = segX + 1;
+    const rows = segZ + 1;
+    const positions = new Float32Array(cols * rows * 3);
+    const indices: number[] = [];
+
+    for (let iz = 0; iz <= segZ; iz += 1) {
+      const tz = iz / segZ;
+      // Smooth non-linear depth stretch: very dense near z ∈ [+3.2, -16], wide toward horizon
+      const z = 3.2 - 118.2 * tz ** 2.35;
+      // Horizontal span expands proportionally with perspective depth so full FOV is always covered
+      const depthFromCam = Math.max(2.0, DAY_CAM_LOCAL_POS.z - z);
+      const halfWidth = Math.max(7.5, depthFromCam * 0.68);
+
+      for (let ix = 0; ix <= segX; ix += 1) {
+        const tx = (ix / segX) * 2 - 1;
+        // Slightly denser X resolution near the center & diagonal shoreline
+        const shapedTx = Math.sign(tx) * (Math.abs(tx) * 0.58 + Math.abs(tx) ** 1.65 * 0.42);
+        const x = shapedTx * halfWidth;
+
+        const idx = (iz * cols + ix) * 3;
+        positions[idx] = x;
+        positions[idx + 1] = 0;
+        positions[idx + 2] = z;
+      }
+    }
+
+    for (let iz = 0; iz < segZ; iz += 1) {
+      for (let ix = 0; ix < segX; ix += 1) {
+        const a = iz * cols + ix;
+        const b = a + 1;
+        const c = a + cols;
+        const d = c + 1;
+        // Front face (+Y upward normal): (b - a) x (c - a) = (+X) x (-Z) = +Y
+        indices.push(a, b, c, b, d, c);
+      }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setIndex(indices);
+    // Keep frustum culling disabled since vertex shader displaces surface height dynamically
+    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, -50), 140);
+    this.geometries.push(geometry);
+    return geometry;
+  }
+
   resize(width: number, height: number) {
     if (this.disposed || width <= 0 || height <= 0) return;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -914,9 +1164,68 @@ export class CosmicSceneRenderer {
     this.prevMoonLat = prevState.lunar.latitudeRad;
   }
 
+  private updateDayNeighbors() {
+    const cur = this.cosmicState;
+    this.nextDayIso = addDateSegment(cur.isoDate, "day", 1);
+    this.prevDayIso = addDateSegment(cur.isoDate, "day", -1);
+
+    const nextState = computeCosmicState(this.nextDayIso);
+    const prevState = computeCosmicState(this.prevDayIso);
+
+    this.nextDayElongDelta = shortestAngleDelta(
+      cur.lunar.elongationRad,
+      nextState.lunar.elongationRad,
+    );
+    this.prevDayElongDelta = shortestAngleDelta(
+      cur.lunar.elongationRad,
+      prevState.lunar.elongationRad,
+    );
+    this.nextDayAgeDelta = shortestCycleDelta(
+      cur.lunar.synodicAgeDays,
+      nextState.lunar.synodicAgeDays,
+      SYNODIC_MONTH_DAYS,
+    );
+    this.prevDayAgeDelta = shortestCycleDelta(
+      cur.lunar.synodicAgeDays,
+      prevState.lunar.synodicAgeDays,
+      SYNODIC_MONTH_DAYS,
+    );
+
+    this.nextDayLat = nextState.lunar.latitudeRad;
+    this.prevDayLat = prevState.lunar.latitudeRad;
+    this.nextDayScale = nextState.lunar.apparentScale;
+    this.prevDayScale = prevState.lunar.apparentScale;
+    this.nextDayIllum = nextState.lunar.illumination;
+    this.prevDayIllum = prevState.lunar.illumination;
+    this.nextDayEarthshine = nextState.lunar.earthshine;
+    this.prevDayEarthshine = prevState.lunar.earthshine;
+    this.nextDayLibLon = nextState.lunar.librationLonRad;
+    this.prevDayLibLon = prevState.lunar.librationLonRad;
+    this.nextDayLibLat = nextState.lunar.librationLatRad;
+    this.prevDayLibLat = prevState.lunar.librationLatRad;
+  }
+
   setMonthDragState(dragging: boolean, fraction: number) {
     this.monthDragging = dragging;
     this.dragMonthFraction = THREE.MathUtils.clamp(fraction, -1, 1);
+  }
+
+  setDayDragState(dragging: boolean, fraction: number) {
+    const wasDragging = this.dayDragging;
+    const clampedFraction = THREE.MathUtils.clamp(fraction, -1, 1);
+    const moved = Math.abs(clampedFraction - this.dragDayFraction) > 0.002;
+    this.dayDragging = dragging;
+    this.dragDayFraction = clampedFraction;
+
+    if (dragging && moved && !this.reducedMotion) {
+      // Keep the ocean calm while the user is actively scrubbing through lunar phases
+      this.tideDebounceRemaining = TIDE_DEBOUNCE_SEC;
+    } else if (wasDragging && !dragging && !this.reducedMotion) {
+      // Pointer released: commit the new tidal equilibrium after a brief natural settle beat
+      if (this.tideDebounceRemaining > TIDE_RELEASE_SETTLE_SEC) {
+        this.tideDebounceRemaining = TIDE_RELEASE_SETTLE_SEC;
+      }
+    }
   }
 
   setState(next: CosmicState) {
@@ -971,7 +1280,33 @@ export class CosmicSceneRenderer {
       }
     }
 
+    // Continuous unwrapped lunar phase & synodic guide age for seamless 1:1 Day scrubbing
+    if (next.isoDate === this.nextDayIso) {
+      this.targetDayElong += this.nextDayElongDelta;
+      this.targetDayAge += this.nextDayAgeDelta;
+    } else if (next.isoDate === this.prevDayIso) {
+      this.targetDayElong += this.prevDayElongDelta;
+      this.targetDayAge += this.prevDayAgeDelta;
+    } else {
+      this.targetDayElong = unwrapAngleNear(next.lunar.elongationRad, this.smoothMoonElong);
+      this.targetDayAge =
+        this.smoothDayAge +
+        shortestCycleDelta(this.smoothDayAge, next.lunar.synodicAgeDays, SYNODIC_MONTH_DAYS);
+    }
+
+    // Debounce coastal tide & swell updates in Day mode so scrubbing never makes water twitch
+    this.pendingTideLevel = next.tidal.springNeapIndex;
+    this.pendingSwellEnergy = next.tidal.swellEnergy;
+    if (this.mode === "day" && !this.reducedMotion) {
+      this.tideDebounceRemaining = TIDE_DEBOUNCE_SEC;
+    } else {
+      this.tideDebounceRemaining = 0;
+      this.committedTideLevel = this.pendingTideLevel;
+      this.committedSwellEnergy = this.pendingSwellEnergy;
+    }
+
     this.updateMonthNeighbors();
+    this.updateDayNeighbors();
 
     if (!this.active || this.reducedMotion) {
       this.snapToTargets();
@@ -985,6 +1320,23 @@ export class CosmicSceneRenderer {
     if (mode !== "month") {
       this.monthDragging = false;
       this.dragMonthFraction = 0;
+    }
+    if (mode !== "day") {
+      this.dayDragging = false;
+      this.dragDayFraction = 0;
+      this.tideDebounceRemaining = 0;
+      this.committedTideLevel = this.pendingTideLevel;
+      this.committedSwellEnergy = this.pendingSwellEnergy;
+    } else {
+      // Entering Day mode: align ocean immediately to the current date's tidal level
+      this.tideDebounceRemaining = 0;
+      this.committedTideLevel = this.cosmicState.tidal.springNeapIndex;
+      this.committedSwellEnergy = this.cosmicState.tidal.swellEnergy;
+      this.pendingTideLevel = this.committedTideLevel;
+      this.pendingSwellEnergy = this.committedSwellEnergy;
+      this.smoothTideLevel = this.committedTideLevel;
+      this.smoothWetTideMemory = this.committedTideLevel;
+      this.smoothSwellEnergy = this.committedSwellEnergy;
     }
 
     if ((mode === "day" || mode === "year") && this.earthRigBlend > 0.95) {
@@ -1040,6 +1392,10 @@ export class CosmicSceneRenderer {
   private snapToTargets() {
     this.monthDragging = false;
     this.dragMonthFraction = 0;
+    this.dayDragging = false;
+    this.dragDayFraction = 0;
+    this.tideDebounceRemaining = 0;
+
     this.targetOrbitAngle = this.cosmicState.solar.earthHeliocentricLongitudeRad;
     this.smoothOrbitAngle = this.targetOrbitAngle;
     this.trailOrbitAngle = this.targetOrbitAngle;
@@ -1055,11 +1411,26 @@ export class CosmicSceneRenderer {
     this.smoothMoonOrbitRadius =
       (this.mode === "month" ? CAROUSEL_MOON_ORBIT_RADIUS : HERO_MOON_ORBIT_RADIUS) *
       moonDistFactor;
-    this.smoothMoonElong = this.cosmicState.lunar.elongationRad;
+
+    this.targetDayElong = this.cosmicState.lunar.elongationRad;
+    this.smoothMoonElong = this.targetDayElong;
+    this.targetDayAge = this.cosmicState.lunar.synodicAgeDays;
+    this.smoothDayAge = this.targetDayAge;
+    this.smoothDayLat = this.cosmicState.lunar.latitudeRad;
+    this.smoothDayLibLon = this.cosmicState.lunar.librationLonRad;
+    this.smoothDayLibLat = this.cosmicState.lunar.librationLatRad;
     this.smoothMoonIllum = this.cosmicState.lunar.illumination;
+    this.smoothMoonEarthshine = this.cosmicState.lunar.earthshine;
     this.smoothMoonScale = this.cosmicState.lunar.apparentScale;
-    this.smoothWaterLevel = this.cosmicState.tidal.waterLevel;
-    this.smoothSwellEnergy = this.cosmicState.tidal.swellEnergy;
+
+    this.pendingTideLevel = this.cosmicState.tidal.springNeapIndex;
+    this.pendingSwellEnergy = this.cosmicState.tidal.swellEnergy;
+    this.committedTideLevel = this.pendingTideLevel;
+    this.committedSwellEnergy = this.pendingSwellEnergy;
+    this.smoothTideLevel = this.committedTideLevel;
+    this.smoothWetTideMemory = this.committedTideLevel;
+    this.smoothSwellEnergy = this.committedSwellEnergy;
+
     this.smoothEpochYears = this.cosmicState.galactic.epochYearsSinceJ2000;
     this.smoothPrecession = this.cosmicState.galactic.axialPrecessionRad;
 
@@ -1080,18 +1451,25 @@ export class CosmicSceneRenderer {
     this.wGalactic = this.mode === "year" ? 1 : 0;
     this.wMonthGuide = this.mode === "month" ? 1 : 0;
     this.wYearGuide = this.mode === "year" ? 1 : 0;
+    this.wDayGuide = this.mode === "day" ? 1 : 0;
     this.smoothSkyBright =
-      this.mode === "year" ? 1.02 : this.mode === "month" ? 0.52 : this.mode === "day" ? 0.3 : 0.48;
+      this.mode === "year"
+        ? 1.02
+        : this.mode === "month"
+          ? 0.52
+          : this.mode === "day"
+            ? 0.24
+            : 0.48;
     this.smoothSkyGamma =
       this.mode === "year"
         ? 0.74
         : this.mode === "month"
           ? 0.83
           : this.mode === "day"
-            ? 0.86
+            ? 0.88
             : 0.84;
     this.smoothSkyReveal =
-      this.mode === "year" ? 1 : this.mode === "month" ? 0.22 : this.mode === "day" ? 0.05 : 0.16;
+      this.mode === "year" ? 1 : this.mode === "month" ? 0.22 : this.mode === "day" ? 0.03 : 0.16;
 
     if (this.mode !== "year") {
       this.sunGroup.position.set(0, 0, 0);
@@ -1172,14 +1550,15 @@ export class CosmicSceneRenderer {
     this.orbitGuideMesh.scale.set(this.smoothOrbitRadius, 1, this.smoothOrbitRadius);
     this.galacticGuideMesh.position.copy(this.sunGroup.position);
 
+    // Northern Hemisphere lunar orientation (waxing illuminated on right +X, waning on left -X)
     const elong = this.smoothMoonElong;
     const moonSunX = Math.sin(elong);
-    const moonSunY = Math.sin(this.cosmicState.lunar.latitudeRad) * 0.65;
+    const moonSunY = Math.sin(this.smoothDayLat) * 0.65;
     const moonSunZ = -Math.cos(elong);
     this.moonUniforms.uSunDir.value.set(moonSunX, moonSunY, moonSunZ).normalize();
     this.moonMesh.scale.setScalar(this.smoothMoonScale);
-    this.moonMesh.rotation.y = -Math.PI * 0.5 + this.cosmicState.lunar.librationLonRad;
-    this.moonMesh.rotation.x = this.cosmicState.lunar.librationLatRad;
+    this.moonMesh.rotation.y = -Math.PI * 0.5 + this.smoothDayLibLon;
+    this.moonMesh.rotation.x = this.smoothDayLibLat;
 
     const galLonShift =
       this.mode === "year" ? this.smoothEpochYears * 0.0085 + ambientTime * 0.0022 : 0;
@@ -1223,20 +1602,21 @@ export class CosmicSceneRenderer {
     outPos: THREE.Vector3,
     outTarget: THREE.Vector3,
   ) {
-    const t = this.reducedMotion ? 0 : this.elapsed;
-    const swayX = Math.sin(t * 0.16) * 0.065;
-    const swayY = Math.cos(t * 0.13) * 0.04;
-
     if (mode === "year") {
+      const t = this.reducedMotion ? 0 : this.elapsed;
+      const swayX = Math.sin(t * 0.16) * 0.065;
+      const swayY = Math.cos(t * 0.13) * 0.04;
       const epochDrift = Math.sin(this.smoothEpochYears * 0.019) * 0.45;
       outPos.set(epochDrift * 0.6 + swayX * 1.4, 0.25 + epochDrift * 0.12 + swayY * 1.2, 8.6);
       outTarget.set(this.sunGroup.position.x * 0.42, this.sunGroup.position.y * 0.3, -1.2);
       return;
     }
 
+    // Coastal Day mode: strictly static tripod framing showing the diagonal beach, ocean waves,
+    // and Moon anchored calmly in the upper sky while the engineering guide slides through it.
     const stageY = this.dayStageGroup.position.y;
-    outPos.set(swayX * 0.55, stageY + 0.16 + swayY * 0.45, 3.85);
-    outTarget.set(0.05, stageY + 0.08, -0.8);
+    outPos.set(DAY_CAM_LOCAL_POS.x, stageY + DAY_CAM_LOCAL_POS.y, DAY_CAM_LOCAL_POS.z);
+    outTarget.set(DAY_CAM_LOCAL_TARGET.x, stageY + DAY_CAM_LOCAL_TARGET.y, DAY_CAM_LOCAL_TARGET.z);
   }
 
   private applyUniforms() {
@@ -1262,10 +1642,22 @@ export class CosmicSceneRenderer {
     this.sunCoronaUniforms.uOpacity.value = this.wSun;
     this.sunGroup.visible = this.wSun > 0.005;
 
-    this.moonUniforms.uEarthshine.value = this.cosmicState.lunar.earthshine;
+    this.moonUniforms.uEarthshine.value = this.smoothMoonEarthshine;
     this.moonUniforms.uOpacity.value = this.wMoon;
+    this.moonHaloUniforms.uMoonIllumination.value = this.smoothMoonIllum;
+    this.moonHaloUniforms.uOpacity.value = this.wMoon;
+    this.moonHaloMesh.visible = this.wMoon > 0.005;
+
+    const scaledMoonR = DAY_MOON_BASE_RADIUS * this.smoothMoonScale;
+    this.lunarGuideUniforms.uOpacity.value = this.wDayGuide;
+    this.lunarGuideUniforms.uSynodicAge.value = this.smoothDayAge;
+    this.lunarGuideUniforms.uMoonClearInner.value = scaledMoonR * 1.15;
+    this.lunarGuideUniforms.uMoonClearOuter.value = scaledMoonR * 1.54;
+    this.lunarGuideMesh.visible = this.wDayGuide > 0.005;
+
     this.oceanUniforms.uTime.value = this.reducedMotion ? 0 : this.elapsed;
-    this.oceanUniforms.uWaterLevel.value = this.smoothWaterLevel;
+    this.oceanUniforms.uTideLevel.value = this.smoothTideLevel;
+    this.oceanUniforms.uWetTideMemory.value = this.smoothWetTideMemory;
     this.oceanUniforms.uSwellEnergy.value = this.smoothSwellEnergy;
     this.oceanUniforms.uMoonIllumination.value = this.smoothMoonIllum;
     this.oceanUniforms.uOpacity.value = this.wOcean;
@@ -1287,11 +1679,15 @@ export class CosmicSceneRenderer {
     this.skyUniforms.uGamma.value = this.smoothSkyGamma;
     this.skyUniforms.uGalacticReveal.value = this.smoothSkyReveal;
     this.starUniforms.uTime.value = this.reducedMotion ? 0 : this.elapsed;
+    this.starUniforms.uSizeScale.value = THREE.MathUtils.lerp(1, 1.24, this.wOcean);
+    this.starUniforms.uHorizonClip.value = this.wOcean;
+    this.starUniforms.uMoonIllum.value = this.smoothMoonIllum;
 
     this.camera.position.copy(this.camPos);
     this.camera.lookAt(this.camTarget);
     this.skyGroup.position.copy(this.camera.position);
     this.sunCoronaMesh.quaternion.copy(this.camera.quaternion);
+    this.moonHaloMesh.quaternion.copy(this.camera.quaternion);
   }
 
   private renderSingleFrame() {
@@ -1312,7 +1708,9 @@ export class CosmicSceneRenderer {
     }
 
     const orbitLambda = this.reducedMotion ? 60 : this.monthDragging ? 12.5 : 6.5;
+    const dayLambda = this.reducedMotion ? 60 : this.dayDragging ? 18.0 : 9.5;
     const astroLambda = this.reducedMotion ? 60 : 7.5;
+    const tideLambda = this.reducedMotion ? 60 : 1.05;
     const camLambda = this.reducedMotion ? 60 : 5.6;
     const fadeLambda = this.reducedMotion ? 60 : 6.4;
 
@@ -1409,36 +1807,127 @@ export class CosmicSceneRenderer {
       dt,
     );
 
-    this.smoothMoonElong = dampAngle(
+    // 1:1 continuous sub-day lunar phase & guide interpolation during Day dragging
+    const dayFraction = this.reducedMotion ? 0 : this.dragDayFraction;
+    const dayElongOffset =
+      dayFraction >= 0
+        ? dayFraction * this.nextDayElongDelta
+        : -dayFraction * this.prevDayElongDelta;
+    const dayAgeOffset =
+      dayFraction >= 0 ? dayFraction * this.nextDayAgeDelta : -dayFraction * this.prevDayAgeDelta;
+    const targetDayLat =
+      dayFraction >= 0
+        ? THREE.MathUtils.lerp(this.cosmicState.lunar.latitudeRad, this.nextDayLat, dayFraction)
+        : THREE.MathUtils.lerp(this.cosmicState.lunar.latitudeRad, this.prevDayLat, -dayFraction);
+    const targetDayScale =
+      dayFraction >= 0
+        ? THREE.MathUtils.lerp(this.cosmicState.lunar.apparentScale, this.nextDayScale, dayFraction)
+        : THREE.MathUtils.lerp(
+            this.cosmicState.lunar.apparentScale,
+            this.prevDayScale,
+            -dayFraction,
+          );
+    const targetDayIllum =
+      dayFraction >= 0
+        ? THREE.MathUtils.lerp(this.cosmicState.lunar.illumination, this.nextDayIllum, dayFraction)
+        : THREE.MathUtils.lerp(
+            this.cosmicState.lunar.illumination,
+            this.prevDayIllum,
+            -dayFraction,
+          );
+    const targetDayEarthshine =
+      dayFraction >= 0
+        ? THREE.MathUtils.lerp(
+            this.cosmicState.lunar.earthshine,
+            this.nextDayEarthshine,
+            dayFraction,
+          )
+        : THREE.MathUtils.lerp(
+            this.cosmicState.lunar.earthshine,
+            this.prevDayEarthshine,
+            -dayFraction,
+          );
+    const targetDayLibLon =
+      dayFraction >= 0
+        ? THREE.MathUtils.lerp(
+            this.cosmicState.lunar.librationLonRad,
+            this.nextDayLibLon,
+            dayFraction,
+          )
+        : THREE.MathUtils.lerp(
+            this.cosmicState.lunar.librationLonRad,
+            this.prevDayLibLon,
+            -dayFraction,
+          );
+    const targetDayLibLat =
+      dayFraction >= 0
+        ? THREE.MathUtils.lerp(
+            this.cosmicState.lunar.librationLatRad,
+            this.nextDayLibLat,
+            dayFraction,
+          )
+        : THREE.MathUtils.lerp(
+            this.cosmicState.lunar.librationLatRad,
+            this.prevDayLibLat,
+            -dayFraction,
+          );
+
+    this.smoothMoonElong = damp(
       this.smoothMoonElong,
-      this.cosmicState.lunar.elongationRad,
-      astroLambda,
+      this.targetDayElong + dayElongOffset,
+      dayLambda,
       dt,
     );
-    this.smoothMoonIllum = damp(
-      this.smoothMoonIllum,
-      this.cosmicState.lunar.illumination,
-      astroLambda,
-      dt,
-    );
-    this.smoothMoonScale = damp(
-      this.smoothMoonScale,
-      this.cosmicState.lunar.apparentScale,
-      astroLambda,
-      dt,
-    );
-    this.smoothWaterLevel = damp(
-      this.smoothWaterLevel,
-      this.cosmicState.tidal.waterLevel,
-      astroLambda,
-      dt,
-    );
+    this.smoothDayAge = damp(this.smoothDayAge, this.targetDayAge + dayAgeOffset, dayLambda, dt);
+    this.smoothDayLat = damp(this.smoothDayLat, targetDayLat, dayLambda, dt);
+    this.smoothDayLibLon = damp(this.smoothDayLibLon, targetDayLibLon, dayLambda, dt);
+    this.smoothDayLibLat = damp(this.smoothDayLibLat, targetDayLibLat, dayLambda, dt);
+    this.smoothMoonIllum = damp(this.smoothMoonIllum, targetDayIllum, dayLambda, dt);
+    this.smoothMoonEarthshine = damp(this.smoothMoonEarthshine, targetDayEarthshine, dayLambda, dt);
+    this.smoothMoonScale = damp(this.smoothMoonScale, targetDayScale, dayLambda, dt);
+
+    // Keep unwrapped day elongation & synodic age bounded once settled
+    if (!this.dayDragging && this.dragDayFraction === 0) {
+      if (
+        Math.abs(this.targetDayElong - this.smoothMoonElong) < 0.0005 &&
+        Math.abs(this.smoothMoonElong) > Math.PI * 8
+      ) {
+        const shift = Math.round(this.smoothMoonElong / TWO_PI) * TWO_PI;
+        this.targetDayElong -= shift;
+        this.smoothMoonElong -= shift;
+      }
+      if (
+        Math.abs(this.targetDayAge - this.smoothDayAge) < 0.001 &&
+        Math.abs(this.smoothDayAge) > SYNODIC_MONTH_DAYS * 8
+      ) {
+        const shift = Math.round(this.smoothDayAge / SYNODIC_MONTH_DAYS) * SYNODIC_MONTH_DAYS;
+        this.targetDayAge -= shift;
+        this.smoothDayAge -= shift;
+      }
+    }
+
+    // Debounced commit & slow natural ocean tide response (~2.5-3.5s settle)
+    if (this.tideDebounceRemaining > 0) {
+      this.tideDebounceRemaining = Math.max(0, this.tideDebounceRemaining - dt);
+      if (this.tideDebounceRemaining === 0) {
+        this.committedTideLevel = this.pendingTideLevel;
+        this.committedSwellEnergy = this.pendingSwellEnergy;
+      }
+    }
+    this.smoothTideLevel = damp(this.smoothTideLevel, this.committedTideLevel, tideLambda, dt);
     this.smoothSwellEnergy = damp(
       this.smoothSwellEnergy,
-      this.cosmicState.tidal.swellEnergy,
-      astroLambda,
+      this.committedSwellEnergy,
+      tideLambda * 0.9,
       dt,
     );
+    // Wet sand dries slower than water recedes, leaving a glistening reflective coastal trail
+    if (this.smoothTideLevel >= this.smoothWetTideMemory || this.reducedMotion) {
+      this.smoothWetTideMemory = this.smoothTideLevel;
+    } else {
+      this.smoothWetTideMemory = damp(this.smoothWetTideMemory, this.smoothTideLevel, 0.28, dt);
+    }
+
     this.smoothEpochYears = damp(
       this.smoothEpochYears,
       this.cosmicState.galactic.epochYearsSinceJ2000,
@@ -1460,18 +1949,25 @@ export class CosmicSceneRenderer {
     const targetGalactic = this.mode === "year" ? 1 : 0;
     const targetMonthGuide = this.mode === "month" ? 1 : 0;
     const targetYearGuide = this.mode === "year" ? 1 : 0;
+    const targetDayGuide = this.mode === "day" ? 1 : 0;
     const targetSkyBright =
-      this.mode === "year" ? 1.02 : this.mode === "month" ? 0.52 : this.mode === "day" ? 0.3 : 0.48;
+      this.mode === "year"
+        ? 1.02
+        : this.mode === "month"
+          ? 0.52
+          : this.mode === "day"
+            ? 0.24
+            : 0.48;
     const targetSkyGamma =
       this.mode === "year"
         ? 0.74
         : this.mode === "month"
           ? 0.83
           : this.mode === "day"
-            ? 0.86
+            ? 0.88
             : 0.84;
     const targetSkyReveal =
-      this.mode === "year" ? 1 : this.mode === "month" ? 0.22 : this.mode === "day" ? 0.05 : 0.16;
+      this.mode === "year" ? 1 : this.mode === "month" ? 0.22 : this.mode === "day" ? 0.03 : 0.16;
 
     this.wEarth = damp(this.wEarth, targetEarth, fadeLambda, dt);
     this.wOrbitalMoon = damp(this.wOrbitalMoon, targetOrbitalMoon, fadeLambda, dt);
@@ -1481,6 +1977,7 @@ export class CosmicSceneRenderer {
     this.wGalactic = damp(this.wGalactic, targetGalactic, fadeLambda, dt);
     this.wMonthGuide = damp(this.wMonthGuide, targetMonthGuide, fadeLambda, dt);
     this.wYearGuide = damp(this.wYearGuide, targetYearGuide, fadeLambda, dt);
+    this.wDayGuide = damp(this.wDayGuide, targetDayGuide, fadeLambda, dt);
     this.smoothSkyBright = damp(this.smoothSkyBright, targetSkyBright, fadeLambda, dt);
     this.smoothSkyGamma = damp(this.smoothSkyGamma, targetSkyGamma, fadeLambda, dt);
     this.smoothSkyReveal = damp(this.smoothSkyReveal, targetSkyReveal, fadeLambda, dt);
