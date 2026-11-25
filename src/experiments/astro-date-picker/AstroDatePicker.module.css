@@ -88,11 +88,11 @@
   align-self: flex-start;
   margin: -0.14em 0 0;
   color: #ffffff;
-  font-size: clamp(14px, 3.48cqi, 16px);
+  font-size: clamp(18px, 5.22cqi, 24px);
   font-weight: 600;
   line-height: 1;
-  letter-spacing: -0.01em;
-  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.65);
+  letter-spacing: -0.015em;
+  text-shadow: 0 1px 14px rgba(0, 0, 0, 0.72);
   -webkit-tap-highlight-color: transparent;
   cursor: pointer;
 }
