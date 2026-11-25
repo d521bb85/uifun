@@ -608,3 +608,104 @@ void main() {
   gl_FragColor = vec4(enhanced, 1.0);
 }
 `;
+
+export const orbitGuideVertexShader = /* glsl */ `
+varying vec2 vUv;
+
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+export const orbitGuideFragmentShader = /* glsl */ `
+uniform float uOpacity;
+uniform float uEarthAngle;
+
+varying vec2 vUv;
+
+void main() {
+  float across = abs(vUv.y - 0.5) * 2.0;
+  float fwY = max(fwidth(across), 0.04);
+
+  float dAngle = mod(vUv.x - uEarthAngle + 3.14159265, 6.2831853) - 3.14159265;
+  float absAngle = abs(dAngle);
+
+  // Smoothly dissolve both ends into space, matching the galactic guide's fade behavior
+  float arcFade = dAngle < 0.0
+    ? smoothstep(1.25, 0.36, absAngle)
+    : smoothstep(0.68, 0.22, absAngle);
+  if (arcFade < 0.002) discard;
+
+  float lineW = fwY * 0.55;
+  float hairline = 1.0 - smoothstep(lineW, lineW + fwY * 1.15, across);
+
+  // Crisp perpendicular engineering graduations: 48 minor ticks (4/month) + 12 major month ticks
+  float minorCoord = vUv.x * (48.0 / 6.2831853);
+  float fwMinor = max(fwidth(minorCoord), 0.004);
+  float minorAntiAlias = smoothstep(0.28, 0.08, fwMinor);
+  float minorTick = (1.0 - smoothstep(fwMinor * 0.45, fwMinor * 1.55, abs(fract(minorCoord + 0.5) - 0.5))) *
+    (1.0 - smoothstep(0.32, 0.32 + fwY * 1.2, across)) * minorAntiAlias;
+
+  float majorCoord = vUv.x * (12.0 / 6.2831853);
+  float fwMajor = max(fwidth(majorCoord), 0.002);
+  float majorAntiAlias = smoothstep(0.28, 0.08, fwMajor);
+  float majorTick = (1.0 - smoothstep(fwMajor * 0.5, fwMajor * 1.6, abs(fract(majorCoord + 0.5) - 0.5))) *
+    (1.0 - smoothstep(0.72, 0.72 + fwY * 1.2, across)) * majorAntiAlias;
+
+  vec3 color = vec3(0.92, 0.94, 0.98);
+  float shape = max(hairline * 0.34, max(minorTick * 0.3, majorTick * 0.52));
+  float alpha = clamp(shape * arcFade * uOpacity, 0.0, 1.0);
+  if (alpha < 0.003) discard;
+
+  gl_FragColor = vec4(color, alpha);
+}
+`;
+
+export const galacticGuideVertexShader = /* glsl */ `
+varying vec2 vUv;
+
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+export const galacticGuideFragmentShader = /* glsl */ `
+uniform float uOpacity;
+uniform float uDrift;
+
+varying vec2 vUv;
+
+void main() {
+  float across = abs(vUv.y - 0.5) * 2.0;
+  float fwY = max(fwidth(across), 0.04);
+
+  float absAlong = abs(vUv.x);
+  float sunClear = smoothstep(0.18, 0.5, absAlong);
+  float endFade = smoothstep(5.4, 1.7, absAlong);
+
+  float lineW = fwY * 0.55;
+  float hairline = 1.0 - smoothstep(lineW, lineW + fwY * 1.15, across);
+
+  // Crisp perpendicular engineering graduations synced 1:1 with galactic drift (1 tick = 1 year)
+  float yearCoord = (vUv.x + uDrift) / 0.36;
+  float fwYear = max(fwidth(yearCoord), 0.004);
+  float yearAntiAlias = smoothstep(0.28, 0.08, fwYear);
+  float yearTick = (1.0 - smoothstep(fwYear * 0.45, fwYear * 1.55, abs(fract(yearCoord + 0.5) - 0.5))) *
+    (1.0 - smoothstep(0.32, 0.32 + fwY * 1.2, across)) * yearAntiAlias;
+
+  float decadeCoord = (vUv.x + uDrift) / 3.6;
+  float fwDecade = max(fwidth(decadeCoord), 0.002);
+  float decadeAntiAlias = smoothstep(0.28, 0.08, fwDecade);
+  float decadeTick = (1.0 - smoothstep(fwDecade * 0.5, fwDecade * 1.6, abs(fract(decadeCoord + 0.5) - 0.5))) *
+    (1.0 - smoothstep(0.72, 0.72 + fwY * 1.2, across)) * decadeAntiAlias;
+
+  vec3 color = vec3(0.92, 0.94, 0.98);
+  float shape = max(hairline * 0.34, max(yearTick * 0.3, decadeTick * 0.52));
+  float alpha = clamp(shape * endFade * sunClear * uOpacity, 0.0, 1.0);
+  if (alpha < 0.003) discard;
+
+  gl_FragColor = vec4(color, alpha);
+}
+`;

@@ -7,11 +7,15 @@ import {
   cloudsVertexShader,
   earthFragmentShader,
   earthVertexShader,
+  galacticGuideFragmentShader,
+  galacticGuideVertexShader,
   galacticStreamVertexShader,
   moonFragmentShader,
   moonVertexShader,
   oceanFragmentShader,
   oceanVertexShader,
+  orbitGuideFragmentShader,
+  orbitGuideVertexShader,
   skyboxFragmentShader,
   skyboxVertexShader,
   starfieldFragmentShader,
@@ -46,14 +50,14 @@ const HERO_RIG = {
   focusFollow: 0.35,
 };
 
-// Orbital Carousel (month) framing: closer to Earth on the horizontal front arc with static Sun
-// anchored upper-center and gentle, damped horizontal drift during drag.
+// Orbital Carousel (month) framing: three-quarter sunlit angle on Earth (~30% lit disc) with
+// static Sun anchored upper-right and gentle, damped horizontal drift during drag.
 const CAROUSEL_RIG = {
-  radial: 5.1,
-  tangent: 2.2,
-  height: 3.3,
-  targetWeight: 0.54,
-  targetY: -0.54,
+  radial: 2.5,
+  tangent: 4.9,
+  height: 3.1,
+  targetWeight: 0.65,
+  targetY: -0.22,
   focusFollow: 0.0,
 };
 
@@ -121,6 +125,18 @@ export class CosmicSceneRenderer {
     uPixelRatio: { value: number };
     uTime: { value: number };
     uSizeScale: { value: number };
+    uOpacity: { value: number };
+    uDrift: { value: number };
+  };
+
+  private readonly orbitGuideMesh: THREE.Mesh;
+  private readonly orbitGuideUniforms: {
+    uOpacity: { value: number };
+    uEarthAngle: { value: number };
+  };
+
+  private readonly galacticGuideMesh: THREE.Mesh;
+  private readonly galacticGuideUniforms: {
     uOpacity: { value: number };
     uDrift: { value: number };
   };
@@ -259,6 +275,8 @@ export class CosmicSceneRenderer {
   private wMoon = 0;
   private wOcean = 0;
   private wGalactic = 0;
+  private wMonthGuide = 0;
+  private wYearGuide = 0;
   private smoothSkyBright = 0.48;
   private smoothSkyGamma = 0.84;
   private smoothSkyReveal = 0.16;
@@ -358,6 +376,16 @@ export class CosmicSceneRenderer {
     this.galacticDustGroup = galGroup;
     this.galacticDustUniforms = galUniforms;
     this.scene.add(this.galacticDustGroup);
+
+    const { mesh: orbitGuideMesh, uniforms: orbitGuideUniforms } = this.createOrbitGuide();
+    this.orbitGuideMesh = orbitGuideMesh;
+    this.orbitGuideUniforms = orbitGuideUniforms;
+    this.scene.add(this.orbitGuideMesh);
+
+    const { mesh: galacticGuideMesh, uniforms: galacticGuideUniforms } = this.createGalacticGuide();
+    this.galacticGuideMesh = galacticGuideMesh;
+    this.galacticGuideUniforms = galacticGuideUniforms;
+    this.scene.add(this.galacticGuideMesh);
 
     this.sunGroup = new THREE.Group();
     const sunGeo = new THREE.SphereGeometry(0.72, 48, 48);
@@ -708,6 +736,140 @@ export class CosmicSceneRenderer {
     return { group, uniforms };
   }
 
+  private createOrbitGuide() {
+    const segments = 256;
+    const halfW = 0.14 / EARTH_ORBIT_RADIUS;
+    const positions = new Float32Array((segments + 1) * 2 * 3);
+    const uvs = new Float32Array((segments + 1) * 2 * 2);
+    const indices: number[] = [];
+
+    for (let i = 0; i <= segments; i += 1) {
+      const angle = (i / segments) * TWO_PI;
+      const cosA = Math.cos(angle);
+      const sinA = -Math.sin(angle);
+      const innerR = 1 - halfW;
+      const outerR = 1 + halfW;
+
+      const v0 = i * 2;
+      const v1 = v0 + 1;
+      positions[v0 * 3] = cosA * innerR;
+      positions[v0 * 3 + 1] = 0;
+      positions[v0 * 3 + 2] = sinA * innerR;
+
+      positions[v1 * 3] = cosA * outerR;
+      positions[v1 * 3 + 1] = 0;
+      positions[v1 * 3 + 2] = sinA * outerR;
+
+      uvs[v0 * 2] = angle;
+      uvs[v0 * 2 + 1] = 0;
+      uvs[v1 * 2] = angle;
+      uvs[v1 * 2 + 1] = 1;
+
+      if (i < segments) {
+        const next0 = v0 + 2;
+        const next1 = v0 + 3;
+        indices.push(v0, v1, next0, v1, next1, next0);
+      }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+    this.geometries.push(geometry);
+
+    const uniforms = {
+      uOpacity: { value: 0 },
+      uEarthAngle: { value: this.smoothOrbitAngle },
+    };
+    const material = new THREE.ShaderMaterial({
+      vertexShader: orbitGuideVertexShader,
+      fragmentShader: orbitGuideFragmentShader,
+      uniforms,
+      transparent: true,
+      depthWrite: false,
+      depthTest: true,
+      depthFunc: THREE.LessEqualDepth,
+      side: THREE.DoubleSide,
+    });
+    this.materials.push(material);
+
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.renderOrder = 6;
+    mesh.visible = false;
+    return { mesh, uniforms };
+  }
+
+  private createGalacticGuide() {
+    const segments = 160;
+    const spanHalf = 5.4;
+    const halfW = 0.11;
+    const slope = 0.48 / 1.45;
+    const positions = new Float32Array((segments + 1) * 2 * 3);
+    const uvs = new Float32Array((segments + 1) * 2 * 2);
+    const indices: number[] = [];
+
+    for (let i = 0; i <= segments; i += 1) {
+      const s = -spanHalf + (i / segments) * spanHalf * 2;
+      const cx = s;
+      const cy = s * slope - 0.012 * s * s;
+      const cz = -0.055 * s * s;
+
+      const tx = 1;
+      const ty = slope - 0.024 * s;
+      const sideLen = Math.hypot(ty, tx) || 1;
+      const sx = (ty / sideLen) * halfW;
+      const sy = (-tx / sideLen) * halfW;
+
+      const v0 = i * 2;
+      const v1 = v0 + 1;
+      positions[v0 * 3] = cx - sx;
+      positions[v0 * 3 + 1] = cy - sy;
+      positions[v0 * 3 + 2] = cz;
+
+      positions[v1 * 3] = cx + sx;
+      positions[v1 * 3 + 1] = cy + sy;
+      positions[v1 * 3 + 2] = cz;
+
+      uvs[v0 * 2] = s;
+      uvs[v0 * 2 + 1] = 0;
+      uvs[v1 * 2] = s;
+      uvs[v1 * 2 + 1] = 1;
+
+      if (i < segments) {
+        const next0 = v0 + 2;
+        const next1 = v0 + 3;
+        indices.push(v0, v1, next0, v1, next1, next0);
+      }
+    }
+
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+    geometry.setIndex(indices);
+    this.geometries.push(geometry);
+
+    const uniforms = {
+      uOpacity: { value: 0 },
+      uDrift: { value: 0 },
+    };
+
+    const material = new THREE.ShaderMaterial({
+      vertexShader: galacticGuideVertexShader,
+      fragmentShader: galacticGuideFragmentShader,
+      uniforms,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    this.materials.push(material);
+
+    const mesh = new THREE.Mesh(geometry, material);
+    mesh.renderOrder = 6;
+    mesh.visible = false;
+    return { mesh, uniforms };
+  }
+
   resize(width: number, height: number) {
     if (this.disposed || width <= 0 || height <= 0) return;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -916,6 +1078,8 @@ export class CosmicSceneRenderer {
     this.wMoon = this.mode === "day" ? 1 : 0;
     this.wOcean = this.mode === "day" ? 1 : 0;
     this.wGalactic = this.mode === "year" ? 1 : 0;
+    this.wMonthGuide = this.mode === "month" ? 1 : 0;
+    this.wYearGuide = this.mode === "year" ? 1 : 0;
     this.smoothSkyBright =
       this.mode === "year" ? 1.02 : this.mode === "month" ? 0.52 : this.mode === "day" ? 0.3 : 0.48;
     this.smoothSkyGamma =
@@ -1004,6 +1168,9 @@ export class CosmicSceneRenderer {
     const sunScale = this.mode === "year" ? 0.34 : this.mode === "month" ? 0.78 : 0.56;
     const nextSunScale = damp(this.sunGroup.scale.x, sunScale, 5.5, dt || 0.016);
     this.sunGroup.scale.setScalar(nextSunScale);
+
+    this.orbitGuideMesh.scale.set(this.smoothOrbitRadius, 1, this.smoothOrbitRadius);
+    this.galacticGuideMesh.position.copy(this.sunGroup.position);
 
     const elong = this.smoothMoonElong;
     const moonSunX = Math.sin(elong);
@@ -1107,6 +1274,14 @@ export class CosmicSceneRenderer {
     this.galacticDustUniforms.uTime.value = this.elapsed;
     this.galacticDustUniforms.uOpacity.value = this.wGalactic * 0.92;
     this.galacticDustGroup.visible = this.wGalactic > 0.005;
+
+    this.orbitGuideUniforms.uOpacity.value = this.wMonthGuide;
+    this.orbitGuideUniforms.uEarthAngle.value = this.smoothOrbitAngle;
+    this.orbitGuideMesh.visible = this.wMonthGuide > 0.005;
+
+    this.galacticGuideUniforms.uOpacity.value = this.wYearGuide;
+    this.galacticGuideUniforms.uDrift.value = this.galacticDustUniforms.uDrift.value;
+    this.galacticGuideMesh.visible = this.wYearGuide > 0.005;
 
     this.skyUniforms.uBrightness.value = this.smoothSkyBright;
     this.skyUniforms.uGamma.value = this.smoothSkyGamma;
@@ -1283,6 +1458,8 @@ export class CosmicSceneRenderer {
     const targetMoon = this.mode === "day" ? 1 : 0;
     const targetOcean = this.mode === "day" ? 1 : 0;
     const targetGalactic = this.mode === "year" ? 1 : 0;
+    const targetMonthGuide = this.mode === "month" ? 1 : 0;
+    const targetYearGuide = this.mode === "year" ? 1 : 0;
     const targetSkyBright =
       this.mode === "year" ? 1.02 : this.mode === "month" ? 0.52 : this.mode === "day" ? 0.3 : 0.48;
     const targetSkyGamma =
@@ -1302,6 +1479,8 @@ export class CosmicSceneRenderer {
     this.wMoon = damp(this.wMoon, targetMoon, fadeLambda, dt);
     this.wOcean = damp(this.wOcean, targetOcean, fadeLambda, dt);
     this.wGalactic = damp(this.wGalactic, targetGalactic, fadeLambda, dt);
+    this.wMonthGuide = damp(this.wMonthGuide, targetMonthGuide, fadeLambda, dt);
+    this.wYearGuide = damp(this.wYearGuide, targetYearGuide, fadeLambda, dt);
     this.smoothSkyBright = damp(this.smoothSkyBright, targetSkyBright, fadeLambda, dt);
     this.smoothSkyGamma = damp(this.smoothSkyGamma, targetSkyGamma, fadeLambda, dt);
     this.smoothSkyReveal = damp(this.smoothSkyReveal, targetSkyReveal, fadeLambda, dt);
