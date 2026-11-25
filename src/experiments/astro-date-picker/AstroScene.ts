@@ -4,10 +4,67 @@ import {
   addDateSegment,
   computeAstroState,
   computeLunarSunDirectionObserver,
+  formatIsoDate,
   GALACTIC_ECLIPTIC_BASIS,
-  galacticToEclipticDirection,
   SYNODIC_MONTH_DAYS,
 } from "./astronomy";
+import {
+  CAROUSEL_EARTH_SCALE,
+  CAROUSEL_MOON_ORBIT_RADIUS,
+  CAROUSEL_RIG,
+  createCoastalGeometry,
+  createGalacticGuide,
+  createGalacticRibbon,
+  createHipparcosStarfield,
+  createLunarGuide,
+  createOrbitGuide,
+  DAY_CAM_LOCAL_POS,
+  DAY_CAM_LOCAL_TARGET,
+  DAY_MOON_BASE_RADIUS,
+  DAY_MOON_DIR,
+  DAY_MOON_POS,
+  EARTH_ORBIT_RADIUS,
+  type EarthCameraRig,
+  getCappedPixelRatio,
+  HERO_MOON_ORBIT_RADIUS,
+  HERO_RIG,
+  MEAN_LUNAR_DISTANCE_KM,
+  MOON_ORBIT_ARRIVAL_BAND,
+  MOON_ORBIT_DRIFT_ACCEL,
+  MOON_ORBIT_DRIFT_SPEED,
+  MOON_PHYSICAL_RADIUS,
+  TIDE_ARRIVAL_BAND,
+  TIDE_DRIFT_ACCEL,
+  TIDE_DRIFT_SPEED,
+  UP_AXIS,
+} from "./sceneGeometry";
+import {
+  type AstroFocusMode,
+  advanceSmoothAngleLinear,
+  advanceSmoothLinear,
+  clampDeltaTime,
+  computeMoonRelAngle,
+  damp,
+  dirToYawPitch,
+  type FlightSpace,
+  flightEase,
+  getModeVisualTargets,
+  getTransitionDuration,
+  isSceneModeInteractive,
+  isSceneValueAnimating,
+  negativeAngleDelta,
+  phaseWeight,
+  pointToSegmentDistanceXZ,
+  positiveAngleDelta,
+  quinticHermite,
+  type SceneValueAnimationState,
+  type SetModeOptions,
+  shortestAngleDelta,
+  shortestCycleDelta,
+  TWO_PI,
+  unwrapAngleNear,
+  yawPitchToDir,
+} from "./sceneMath";
 import {
   atmosphereFragmentShader,
   atmosphereVertexShader,
@@ -15,148 +72,35 @@ import {
   cloudsVertexShader,
   earthFragmentShader,
   earthVertexShader,
-  galacticGuideFragmentShader,
-  galacticGuideVertexShader,
-  galacticStreamVertexShader,
-  lunarGuideFragmentShader,
-  lunarGuideVertexShader,
   moonFragmentShader,
   moonHaloFragmentShader,
   moonHaloVertexShader,
   moonVertexShader,
   oceanFragmentShader,
   oceanVertexShader,
-  orbitGuideFragmentShader,
-  orbitGuideVertexShader,
   skyboxFragmentShader,
   skyboxVertexShader,
-  starfieldFragmentShader,
-  starfieldVertexShader,
   sunCoronaFragmentShader,
   sunCoronaVertexShader,
   sunFragmentShader,
   sunVertexShader,
 } from "./shaders";
-import { BRIGHT_STARS, bvToRgb } from "./starCatalog";
 
-export type AstroFocusMode = "idle" | "year" | "month" | "day";
-
-export interface SetModeOptions {
-  deferUntilValueSettled?: boolean;
-}
-
-export interface SceneValueAnimationState {
-  mode: AstroFocusMode;
-  flightActive: boolean;
-  orbitError: number;
-  dayElongError: number;
-  dayAgeError: number;
-  epochYearsError: number;
-  sunYearPosError: number;
-}
-
-const SCENE_INTERACTIVE_FLIGHT_PROGRESS = 0.5;
-
-export function isSceneModeInteractive(
-  currentMode: AstroFocusMode,
-  targetMode: AstroFocusMode,
-  pendingMode: AstroFocusMode | null,
-  flightActive: boolean,
-  flightProgress = 1,
-): boolean {
-  if (currentMode !== targetMode || pendingMode !== null) return false;
-  if (!flightActive) return true;
-  return flightProgress >= SCENE_INTERACTIVE_FLIGHT_PROGRESS;
-}
-
-export function isSceneValueAnimating(state: SceneValueAnimationState): boolean {
-  if (state.mode === "month") {
-    return state.orbitError > 0.02;
-  }
-  if (state.mode === "day") {
-    return state.dayElongError > 0.02 || state.dayAgeError > 0.06;
-  }
-  if (state.mode === "year") {
-    if (state.epochYearsError > 0.05) return true;
-    if (!state.flightActive) {
-      return state.sunYearPosError > 0.025;
-    }
-  }
-  return false;
-}
-
-const TEXTURE_BASE = "/textures/astro";
-const EARTH_ORBIT_RADIUS = 6.2;
-const MEAN_LUNAR_DISTANCE_KM = 384400;
-const MOON_PHYSICAL_RADIUS = 0.2725;
-const HERO_MOON_ORBIT_RADIUS = 3.2;
-const CAROUSEL_MOON_ORBIT_RADIUS = 1.75;
-const CAROUSEL_EARTH_SCALE = 1.0;
-const J2000_OBLIQUITY_RAD = THREE.MathUtils.degToRad(23.43929111);
-const TWO_PI = Math.PI * 2;
-
-const UP_AXIS = new THREE.Vector3(0, 1, 0);
-const DAY_MOON_BASE_RADIUS = 0.5;
-const DAY_MOON_POS = new THREE.Vector3(-0.06, 2.38, -3.6);
-const DAY_CAM_LOCAL_POS = new THREE.Vector3(0.0, 1.28, 4.6);
-const DAY_CAM_LOCAL_TARGET = new THREE.Vector3(0.0, 1.18, -4.0);
-const DAY_MOON_DIR = DAY_MOON_POS.clone().sub(DAY_CAM_LOCAL_POS).normalize();
-const DAY_GUIDE_HALF_SPAN = 4.2;
-const DAY_GUIDE_DAY_SPACING = 0.215;
-// Constant-speed coastal tidal drift: gentle ramp-up/down with steady cruise velocity
-const TIDE_DRIFT_SPEED = 0.16;
-const TIDE_DRIFT_ACCEL = 0.7;
-const TIDE_ARRIVAL_BAND = 0.035;
-// Constant-speed lunar orbital catch-up relative to Earth (co-orbiting the Sun with Earth)
-const MOON_ORBIT_DRIFT_SPEED = 0.72;
-const MOON_ORBIT_DRIFT_ACCEL = 2.4;
-const MOON_ORBIT_ARRIVAL_BAND = 0.24;
-
-interface EarthCameraRig {
-  radial: number;
-  tangent: number;
-  height: number;
-  targetWeight: number;
-  targetY: number;
-}
-
-// Hero (idle) framing: Earth fills the left corner (~1/3 of the card) with static Sun upper-right
-// and the Moon orbiting honestly across its true 360° geocentric ecliptic path.
-const HERO_RIG: EarthCameraRig = {
-  radial: 1.12,
-  tangent: 2.29,
-  height: 0.8,
-  targetWeight: 0.67,
-  targetY: 0.02,
+export {
+  type AstroFocusMode,
+  isSceneModeInteractive,
+  isSceneValueAnimating,
+  type SceneValueAnimationState,
+  type SetModeOptions,
 };
 
-// Orbital Carousel (month) framing: three-quarter sunlit angle on Earth (~30% lit disc) with
-// static Sun anchored upper-right while Earth stays locked in frame as the orbit advances.
-const CAROUSEL_RIG: EarthCameraRig = {
-  radial: 2.5,
-  tangent: 4.9,
-  height: 3.1,
-  targetWeight: 0.65,
-  targetY: -0.22,
-};
-
-type FlightSpace = "cylindrical" | "cartesian";
-
-interface ModeVisualTargets {
-  wEarth: number;
-  wOrbitalMoon: number;
-  wSun: number;
-  wMoon: number;
-  wOcean: number;
-  wGalactic: number;
-  wMonthGuide: number;
-  wYearGuide: number;
-  wDayGuide: number;
-  starHorizonClip: number;
-  skyBright: number;
-  skyGamma: number;
-  skyReveal: number;
-  sunScale: number;
+function resolveTextureBase(): string {
+  const base =
+    typeof import.meta !== "undefined" && import.meta.env?.BASE_URL
+      ? import.meta.env.BASE_URL
+      : "/";
+  const normalized = base.endsWith("/") ? base.slice(0, -1) : base;
+  return `${normalized}/textures/astro`;
 }
 
 interface CameraFlight {
@@ -198,239 +142,8 @@ interface CameraFlight {
   startStarHorizonClip: number;
 }
 
-function getModeVisualTargets(mode: AstroFocusMode): ModeVisualTargets {
-  return {
-    wEarth: mode === "idle" || mode === "month" ? 1 : 0,
-    wOrbitalMoon: mode === "idle" || mode === "month" ? 1 : 0,
-    wSun: mode === "idle" || mode === "month" || mode === "year" ? 1 : 0,
-    wMoon: mode === "day" ? 1 : 0,
-    wOcean: mode === "day" ? 1 : 0,
-    wGalactic: mode === "year" ? 1 : 0,
-    wMonthGuide: mode === "month" ? 1 : 0,
-    wYearGuide: mode === "year" ? 1 : 0,
-    wDayGuide: mode === "day" ? 1 : 0,
-    starHorizonClip: mode === "day" ? 1 : 0,
-    skyBright: mode === "year" ? 1.02 : mode === "month" ? 0.52 : mode === "day" ? 0.24 : 0.48,
-    skyGamma: mode === "year" ? 0.74 : mode === "month" ? 0.83 : mode === "day" ? 0.88 : 0.84,
-    skyReveal: mode === "year" ? 1 : mode === "month" ? 0.22 : mode === "day" ? 0.03 : 0.16,
-    sunScale: mode === "year" ? 0.34 : mode === "month" ? 0.78 : 0.56,
-  };
-}
-
-const FLIGHT_EASE_OUT_POWER = 1.75;
-
-function getTransitionDuration(from: AstroFocusMode, to: AstroFocusMode): number {
-  if ((from === "idle" && to === "month") || (from === "month" && to === "idle")) return 0.94;
-  if ((from === "idle" && to === "day") || (from === "day" && to === "idle")) return 1.02;
-  if ((from === "idle" && to === "year") || (from === "year" && to === "idle")) return 1.04;
-  if ((from === "month" && to === "year") || (from === "year" && to === "month")) return 1.04;
-  if ((from === "month" && to === "day") || (from === "day" && to === "month")) return 1.12;
-  return 1.14; // year <-> day
-}
-
-function smootherstep(t: number): number {
-  const c = THREE.MathUtils.clamp(t, 0, 1);
-  return c * c * c * (c * (c * 6 - 15) + 10);
-}
-
-/**
- * Asymmetric ease-in-out curve:
- * - Zero initial velocity (no frame-1 twitch), brisk acceleration into the flight
- * - Longer, velvety C² ease-out cushion at the end so the camera settles smoothly into place
- */
-function flightEase(u: number): number {
-  const c = THREE.MathUtils.clamp(u, 0, 1);
-  const ss = c * c * (3 - 2 * c);
-  return 1 - (1 - ss) ** FLIGHT_EASE_OUT_POWER;
-}
-
-function windowProgress(u: number, start: number, end: number): number {
-  return smootherstep((u - start) / Math.max(end - start, 1e-4));
-}
-
-function phaseWeight(
-  startVal: number,
-  targetVal: number,
-  u: number,
-  inStart: number,
-  inEnd: number,
-  outStart: number,
-  outEnd: number,
-): number {
-  if (Math.abs(targetVal - startVal) < 1e-4) return targetVal;
-  const p =
-    targetVal > startVal ? windowProgress(u, inStart, inEnd) : windowProgress(u, outStart, outEnd);
-  return THREE.MathUtils.lerp(startVal, targetVal, p);
-}
-
-/**
- * Smooth asymmetric Hermite flight interpolation:
- * - From rest (startVel = 0): zero initial velocity, swift glide, velvety C² ease-out landing.
- * - Mid-flight redirect (startVel != 0): preserves incoming velocity seamlessly while curving
- *   to the new destination and settling softly at zero velocity & zero acceleration.
- */
-function quinticHermite(
-  start: number,
-  target: number,
-  startVel: number,
-  duration: number,
-  u: number,
-): number {
-  const c = THREE.MathUtils.clamp(u, 0, 1);
-  const c2 = c * c;
-  const c3 = c2 * c;
-  const c4 = c3 * c;
-  const c5 = c4 * c;
-  const s = flightEase(c);
-  const m = c - 6 * c3 + 8 * c4 - 3 * c5;
-  const delta = target - start;
-  let velTerm = startVel * duration;
-  // Softly damp carryover when reversing direction mid-flight so turns stay graceful with minimal overshoot
-  if (velTerm * delta < 0) {
-    velTerm *= 0.55;
-  }
-  const maxVelTerm = Math.max(Math.abs(delta) * 1.4, 0.35);
-  velTerm = THREE.MathUtils.clamp(velTerm, -maxVelTerm, maxVelTerm);
-  return start + delta * s + velTerm * m;
-}
-
-function dirToYawPitch(dir: THREE.Vector3): [number, number] {
-  const yaw = Math.atan2(-dir.x, -dir.z);
-  const pitch = Math.asin(THREE.MathUtils.clamp(dir.y, -0.999, 0.999));
-  return [yaw, pitch];
-}
-
-function yawPitchToDir(yaw: number, pitch: number, out: THREE.Vector3): THREE.Vector3 {
-  const cosP = Math.cos(pitch);
-  return out.set(-Math.sin(yaw) * cosP, Math.sin(pitch), -Math.cos(yaw) * cosP);
-}
-
-function pointToSegmentDistanceXZ(
-  px: number,
-  pz: number,
-  ax: number,
-  az: number,
-  bx: number,
-  bz: number,
-): number {
-  const dx = bx - ax;
-  const dz = bz - az;
-  const lenSq = dx * dx + dz * dz;
-  if (lenSq < 1e-8) return Math.hypot(px - ax, pz - az);
-  const t = THREE.MathUtils.clamp(((px - ax) * dx + (pz - az) * dz) / lenSq, 0, 1);
-  return Math.hypot(px - (ax + t * dx), pz - (az + t * dz));
-}
-
-function damp(current: number, target: number, lambda: number, dt: number): number {
-  return THREE.MathUtils.lerp(current, target, 1 - Math.exp(-lambda * dt));
-}
-
-function advanceSmoothLinear(
-  current: number,
-  target: number,
-  velocity: number,
-  maxSpeed: number,
-  accel: number,
-  arrivalBand: number,
-  dt: number,
-): [number, number] {
-  const diff = target - current;
-  if (Math.abs(diff) < 1e-4 && Math.abs(velocity) < 1e-3) {
-    return [target, 0];
-  }
-
-  // Cruise at a steady constant speed outside a tiny soft-landing band near target
-  const speedScale = Math.min(1, Math.abs(diff) / arrivalBand);
-  const desiredVelocity = Math.sign(diff) * maxSpeed * speedScale;
-
-  // Ramp velocity smoothly so starts, stops, and direction reversals have zero jerk
-  const maxVelStep = accel * dt;
-  const velDiff = desiredVelocity - velocity;
-  const nextVelocity =
-    Math.abs(velDiff) <= maxVelStep ? desiredVelocity : velocity + Math.sign(velDiff) * maxVelStep;
-
-  const nextPos = current + nextVelocity * dt;
-  if ((diff > 0 && nextPos >= target) || (diff < 0 && nextPos <= target)) {
-    return [target, 0];
-  }
-
-  return [nextPos, nextVelocity];
-}
-
-function unwrapAngleNear(angle: number, reference: number): number {
-  let diff = ((angle - reference + Math.PI) % TWO_PI) - Math.PI;
-  if (diff < -Math.PI) diff += TWO_PI;
-  return reference + diff;
-}
-
-function shortestAngleDelta(from: number, to: number): number {
-  let diff = ((to - from + Math.PI) % TWO_PI) - Math.PI;
-  if (diff < -Math.PI) diff += TWO_PI;
-  return diff;
-}
-
-function advanceSmoothAngleLinear(
-  current: number,
-  target: number,
-  velocity: number,
-  maxSpeed: number,
-  accel: number,
-  arrivalBand: number,
-  dt: number,
-): [number, number] {
-  const diff = shortestAngleDelta(current, target);
-  if (Math.abs(diff) < 1e-4 && Math.abs(velocity) < 1e-3) {
-    return [shortestAngleDelta(0, target), 0];
-  }
-
-  // Cruise at a steady constant angular speed outside a soft-landing band near target
-  const speedScale = Math.min(1, Math.abs(diff) / arrivalBand);
-  const desiredVelocity = Math.sign(diff) * maxSpeed * speedScale;
-
-  // Ramp velocity smoothly so starts, stops, and direction reversals have zero jerk
-  const maxVelStep = accel * dt;
-  const velDiff = desiredVelocity - velocity;
-  const nextVelocity =
-    Math.abs(velDiff) <= maxVelStep ? desiredVelocity : velocity + Math.sign(velDiff) * maxVelStep;
-
-  const step = nextVelocity * dt;
-  if ((diff > 0 && step >= diff) || (diff < 0 && step <= diff)) {
-    return [shortestAngleDelta(0, target), 0];
-  }
-
-  return [shortestAngleDelta(0, current + step), nextVelocity];
-}
-
-function computeMoonRelAngle(state: AstroState): number {
-  return shortestAngleDelta(state.solar.earthHeliocentricLongitudeRad, state.lunar.longitudeRad);
-}
-
-function shortestCycleDelta(from: number, to: number, period: number): number {
-  const half = period * 0.5;
-  let diff = ((to - from + half) % period) - half;
-  if (diff < -half) diff += period;
-  return diff;
-}
-
-function positiveAngleDelta(from: number, to: number): number {
-  const diff = (((to - from) % TWO_PI) + TWO_PI) % TWO_PI;
-  return diff === 0 ? TWO_PI : diff;
-}
-
-function negativeAngleDelta(from: number, to: number): number {
-  const diff = (((to - from) % TWO_PI) + TWO_PI) % TWO_PI;
-  return diff === 0 ? -TWO_PI : diff - TWO_PI;
-}
-
-function seededRandom(seed: number): () => number {
-  let state = seed >>> 0;
-  return () => {
-    state = (state * 1664525 + 1013904223) >>> 0;
-    return state / 4294967296;
-  };
-}
-
 export class AstroSceneRenderer {
+  private readonly canvas: HTMLCanvasElement;
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene: THREE.Scene;
   private readonly camera: THREE.PerspectiveCamera;
@@ -579,8 +292,11 @@ export class AstroSceneRenderer {
   private pendingMode: AstroFocusMode | null = null;
   private sceneInteractive = false;
   private onSceneInteractiveChange: ((interactive: boolean) => void) | null = null;
+  private onContextRestored: (() => void) | null = null;
   private active = true;
+  private pageVisible = true;
   private reducedMotion = false;
+  private contextLost = false;
   private disposed = false;
   private rafId: number | null = null;
   private lastTime = 0;
@@ -619,6 +335,7 @@ export class AstroSceneRenderer {
   private smoothOrbitAngle: number;
   private monthDragging = false;
   private dragMonthFraction = 0;
+  private monthDragAnchorDay: number | null = null;
   private nextMonthIso = "";
   private prevMonthIso = "";
   private nextOrbitDelta = TWO_PI / 12;
@@ -740,7 +457,25 @@ export class AstroSceneRenderer {
     startStarHorizonClip: 0,
   };
 
+  private readonly handleContextLost = (event: Event) => {
+    event.preventDefault();
+    this.contextLost = true;
+    this.stopLoop();
+  };
+
+  private readonly handleContextRestored = () => {
+    this.contextLost = false;
+    if (this.disposed) return;
+    if (this.onContextRestored) {
+      this.onContextRestored();
+    } else {
+      this.syncLoopState();
+      this.renderSingleFrame();
+    }
+  };
+
   private constructor(canvas: HTMLCanvasElement, initialState: AstroState) {
+    this.canvas = canvas;
     this.astroState = initialState;
     this.targetOrbitAngle = initialState.solar.earthHeliocentricLongitudeRad;
     this.smoothOrbitAngle = initialState.solar.earthHeliocentricLongitudeRad;
@@ -784,18 +519,35 @@ export class AstroSceneRenderer {
     this.renderer.toneMappingExposure = 1.08;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
+    this.canvas.addEventListener("webglcontextlost", this.handleContextLost, false);
+    this.canvas.addEventListener("webglcontextrestored", this.handleContextRestored, false);
+
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(36, 460 / 290, 0.05, 400);
 
+    const textureBase = resolveTextureBase();
     const loader = new THREE.TextureLoader();
+    const maxAnisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
     const loadTex = (file: string, srgb = true) => {
-      const tex = loader.load(`${TEXTURE_BASE}/${file}`, () => {
-        if (!this.disposed) this.renderSingleFrame();
-      });
+      const url = `${textureBase}/${file}`;
+      const tex = loader.load(
+        url,
+        () => {
+          if (this.disposed) {
+            tex.dispose();
+            return;
+          }
+          this.renderSingleFrame();
+        },
+        undefined,
+        () => {
+          // Degrade gracefully if a texture fails to fetch (offline / CDN error)
+        },
+      );
       tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
       tex.wrapS = THREE.RepeatWrapping;
       tex.wrapT = THREE.ClampToEdgeWrapping;
-      tex.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+      tex.anisotropy = maxAnisotropy;
       this.textures.push(tex);
       return tex;
     };
@@ -808,6 +560,8 @@ export class AstroSceneRenderer {
     const moonAlbedoMap = loadTex("moon_albedo.jpg", true);
     const milkyWayMap = loadTex("milky_way.jpg", true);
     const sunSurfaceMap = loadTex("sun_surface.jpg", true);
+
+    const collector = { geometries: this.geometries, materials: this.materials };
 
     this.skyGroup = new THREE.Group();
     const skyGeo = new THREE.SphereGeometry(180, 48, 32);
@@ -829,6 +583,7 @@ export class AstroSceneRenderer {
     this.materials.push(skyMaterial);
     const skyMesh = new THREE.Mesh(skyGeo, skyMaterial);
     skyMesh.renderOrder = -2;
+    skyMesh.frustumCulled = false;
     // True J2000 Galactic plane orientation for Hero/Month/Day (aligned with Hipparcos stars)
     const galBasis = new THREE.Matrix4().makeBasis(
       new THREE.Vector3(...GALACTIC_ECLIPTIC_BASIS.center),
@@ -866,31 +621,35 @@ export class AstroSceneRenderer {
     const yearSkyMesh = new THREE.Mesh(skyGeo, yearSkyMaterial);
     yearSkyMesh.quaternion.copy(this.yearSkyQuatWorld);
     yearSkyMesh.renderOrder = -1;
+    yearSkyMesh.frustumCulled = false;
     yearSkyMesh.visible = false;
     this.yearSkyMesh = yearSkyMesh;
     this.skyGroup.add(yearSkyMesh);
 
-    const {
-      geometry: starGeo,
-      material: starMat,
-      uniforms: starUniforms,
-    } = this.createHipparcosStarfield();
+    const { points: starPoints, uniforms: starUniforms } = createHipparcosStarfield(
+      this.astroState.lunar.illumination,
+      collector,
+    );
     this.starUniforms = starUniforms;
-    this.skyGroup.add(new THREE.Points(starGeo, starMat));
+    this.skyGroup.add(starPoints);
     this.scene.add(this.skyGroup);
 
     this.yearStageGroup = new THREE.Group();
-    const { group: galGroup, uniforms: galUniforms } = this.createGalacticRibbon();
+    const { group: galGroup, uniforms: galUniforms } = createGalacticRibbon(collector);
     this.galacticDustGroup = galGroup;
     this.galacticDustUniforms = galUniforms;
     this.yearStageGroup.add(this.galacticDustGroup);
 
-    const { mesh: orbitGuideMesh, uniforms: orbitGuideUniforms } = this.createOrbitGuide();
+    const { mesh: orbitGuideMesh, uniforms: orbitGuideUniforms } = createOrbitGuide(
+      this.smoothOrbitAngle,
+      collector,
+    );
     this.orbitGuideMesh = orbitGuideMesh;
     this.orbitGuideUniforms = orbitGuideUniforms;
     this.scene.add(this.orbitGuideMesh);
 
-    const { mesh: galacticGuideMesh, uniforms: galacticGuideUniforms } = this.createGalacticGuide();
+    const { mesh: galacticGuideMesh, uniforms: galacticGuideUniforms } =
+      createGalacticGuide(collector);
     this.galacticGuideMesh = galacticGuideMesh;
     this.galacticGuideUniforms = galacticGuideUniforms;
     this.yearStageGroup.add(this.galacticGuideMesh);
@@ -1071,12 +830,15 @@ export class AstroSceneRenderer {
     this.moonMesh.renderOrder = 4;
     this.dayStageGroup.add(this.moonMesh);
 
-    const { mesh: lunarGuideMesh, uniforms: lunarGuideUniforms } = this.createLunarGuide();
+    const { mesh: lunarGuideMesh, uniforms: lunarGuideUniforms } = createLunarGuide(
+      this.smoothDayAge,
+      collector,
+    );
     this.lunarGuideMesh = lunarGuideMesh;
     this.lunarGuideUniforms = lunarGuideUniforms;
     this.dayStageGroup.add(this.lunarGuideMesh);
 
-    const oceanGeo = this.createCoastalGeometry();
+    const oceanGeo = createCoastalGeometry(collector);
     this.oceanUniforms = {
       uTime: { value: 0 },
       uTideLevel: { value: initialState.tidal.springNeapIndex },
@@ -1126,424 +888,13 @@ export class AstroSceneRenderer {
     }
   }
 
-  private createHipparcosStarfield() {
-    const bgCount = 3200;
-    const total = BRIGHT_STARS.length + bgCount;
-    const positions = new Float32Array(total * 3);
-    const colors = new Float32Array(total * 3);
-    const sizes = new Float32Array(total);
-    const phases = new Float32Array(total);
-
-    const radius = 165;
-    const cosE = Math.cos(J2000_OBLIQUITY_RAD);
-    const sinE = Math.sin(J2000_OBLIQUITY_RAD);
-    let idx = 0;
-
-    for (const star of BRIGHT_STARS) {
-      const ra = (star.raHours / 24) * TWO_PI;
-      const dec = THREE.MathUtils.degToRad(star.decDeg);
-      const cosDec = Math.cos(dec);
-
-      // J2000 equatorial -> ecliptic world frame via R_x(-ε) so constellations align with the ecliptic
-      const xEq = cosDec * Math.cos(ra);
-      const yEq = Math.sin(dec);
-      const zEq = -cosDec * Math.sin(ra);
-
-      positions[idx * 3] = radius * xEq;
-      positions[idx * 3 + 1] = radius * (yEq * cosE + zEq * sinE);
-      positions[idx * 3 + 2] = radius * (-yEq * sinE + zEq * cosE);
-
-      const [r, g, b] = bvToRgb(star.bv);
-      const brightness = THREE.MathUtils.clamp(1.3 - (star.mag + 1.5) * 0.13, 0.55, 1.45);
-      colors[idx * 3] = r * brightness;
-      colors[idx * 3 + 1] = g * brightness;
-      colors[idx * 3 + 2] = b * brightness;
-      sizes[idx] = THREE.MathUtils.clamp(4.2 - star.mag * 0.55, 1.9, 5.2);
-      phases[idx] = idx * 0.73;
-      idx += 1;
-    }
-
-    const rand = seededRandom(20261124);
-    for (let i = 0; i < bgCount; i += 1) {
-      const u = rand() * 2 - 1;
-      const inBand = rand() < 0.45;
-      const lat = inBand ? (rand() - 0.5 + (rand() - 0.5)) * 0.34 : Math.asin(u);
-      const lon = rand() * TWO_PI;
-
-      // Exact IAU J2000 Galactic -> Ecliptic transform so Milky Way band aligns with Hipparcos stars
-      const [ex, ey, ez] = galacticToEclipticDirection(lon, lat);
-      positions[idx * 3] = radius * ex;
-      positions[idx * 3 + 1] = radius * ey;
-      positions[idx * 3 + 2] = radius * ez;
-
-      const bv = -0.15 + rand() * 1.45;
-      const [r, g, b] = bvToRgb(bv);
-      const magPower = rand() ** 2.6;
-      const dim = 0.32 + magPower * 0.78;
-      colors[idx * 3] = r * dim;
-      colors[idx * 3 + 1] = g * dim;
-      colors[idx * 3 + 2] = b * dim;
-      sizes[idx] = 1.15 + magPower * 2.35;
-      phases[idx] = rand() * TWO_PI;
-      idx += 1;
-    }
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute("aColor", new THREE.BufferAttribute(colors, 3));
-    geometry.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
-    geometry.setAttribute("aPhase", new THREE.BufferAttribute(phases, 1));
-    this.geometries.push(geometry);
-
-    const uniforms = {
-      uPixelRatio: { value: Math.min(window.devicePixelRatio || 1, 2) },
-      uTime: { value: 0 },
-      uSizeScale: { value: 1 },
-      uOpacity: { value: 0.96 },
-      uHorizonClip: { value: 0 },
-      uMoonDir: { value: DAY_MOON_DIR.clone() },
-      uMoonIllum: { value: this.astroState.lunar.illumination },
-    };
-
-    const material = new THREE.ShaderMaterial({
-      vertexShader: starfieldVertexShader,
-      fragmentShader: starfieldFragmentShader,
-      uniforms,
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
-    this.materials.push(material);
-
-    return { geometry, material, uniforms };
-  }
-
-  private createGalacticRibbon() {
-    const group = new THREE.Group();
-    const count = 1400;
-    const positions = new Float32Array(count * 3);
-    const colors = new Float32Array(count * 3);
-    const sizes = new Float32Array(count);
-    const phases = new Float32Array(count);
-    const rand = seededRandom(88421);
-
-    for (let i = 0; i < count; i += 1) {
-      const along = (rand() - 0.5) * 46;
-      const spread = (rand() - 0.5) * (rand() - 0.5) * 18;
-      const thickness = (rand() - 0.5) * (rand() - 0.5) * 6.5;
-
-      // Store local offsets; galacticStreamVertexShader wraps along X seamlessly
-      positions[i * 3] = along;
-      positions[i * 3 + 1] = thickness;
-      positions[i * 3 + 2] = -6.5 + spread;
-
-      const warmCore = Math.exp(-((along + 3) * (along + 3)) / 140);
-      const tint = rand();
-      const r = THREE.MathUtils.lerp(0.68, 1.0, warmCore * 0.65 + tint * 0.35);
-      const g = THREE.MathUtils.lerp(0.76, 0.88, warmCore * 0.5 + tint * 0.3);
-      const b = THREE.MathUtils.lerp(0.98, 0.72, warmCore * 0.6);
-
-      const intensity = 0.25 + rand() * 0.65;
-      colors[i * 3] = r * intensity;
-      colors[i * 3 + 1] = g * intensity;
-      colors[i * 3 + 2] = b * intensity;
-      sizes[i] = rand() < 0.08 ? 4.5 + rand() * 3.5 : 1.0 + rand() * 2.1;
-      phases[i] = rand() * Math.PI * 2;
-    }
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute("aColor", new THREE.BufferAttribute(colors, 3));
-    geometry.setAttribute("aSize", new THREE.BufferAttribute(sizes, 1));
-    geometry.setAttribute("aPhase", new THREE.BufferAttribute(phases, 1));
-    this.geometries.push(geometry);
-
-    const uniforms = {
-      uPixelRatio: { value: Math.min(window.devicePixelRatio || 1, 2) },
-      uTime: { value: 0 },
-      uSizeScale: { value: 1.15 },
-      uOpacity: { value: 0 },
-      uDrift: { value: 0 },
-    };
-
-    const material = new THREE.ShaderMaterial({
-      vertexShader: galacticStreamVertexShader,
-      fragmentShader: starfieldFragmentShader,
-      uniforms,
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
-    this.materials.push(material);
-
-    group.add(new THREE.Points(geometry, material));
-    return { group, uniforms };
-  }
-
-  private createOrbitGuide() {
-    const segments = 256;
-    const halfW = 0.14 / EARTH_ORBIT_RADIUS;
-    const positions = new Float32Array((segments + 1) * 2 * 3);
-    const uvs = new Float32Array((segments + 1) * 2 * 2);
-    const indices: number[] = [];
-
-    for (let i = 0; i <= segments; i += 1) {
-      const angle = (i / segments) * TWO_PI;
-      const cosA = Math.cos(angle);
-      const sinA = -Math.sin(angle);
-      const innerR = 1 - halfW;
-      const outerR = 1 + halfW;
-
-      const v0 = i * 2;
-      const v1 = v0 + 1;
-      positions[v0 * 3] = cosA * innerR;
-      positions[v0 * 3 + 1] = 0;
-      positions[v0 * 3 + 2] = sinA * innerR;
-
-      positions[v1 * 3] = cosA * outerR;
-      positions[v1 * 3 + 1] = 0;
-      positions[v1 * 3 + 2] = sinA * outerR;
-
-      uvs[v0 * 2] = angle;
-      uvs[v0 * 2 + 1] = 0;
-      uvs[v1 * 2] = angle;
-      uvs[v1 * 2 + 1] = 1;
-
-      if (i < segments) {
-        const next0 = v0 + 2;
-        const next1 = v0 + 3;
-        indices.push(v0, v1, next0, v1, next1, next0);
-      }
-    }
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
-    geometry.setIndex(indices);
-    this.geometries.push(geometry);
-
-    const uniforms = {
-      uOpacity: { value: 0 },
-      uEarthAngle: { value: this.smoothOrbitAngle },
-    };
-    const material = new THREE.ShaderMaterial({
-      vertexShader: orbitGuideVertexShader,
-      fragmentShader: orbitGuideFragmentShader,
-      uniforms,
-      transparent: true,
-      depthWrite: false,
-      depthTest: true,
-      depthFunc: THREE.LessEqualDepth,
-      side: THREE.DoubleSide,
-    });
-    this.materials.push(material);
-
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.renderOrder = 6;
-    mesh.visible = false;
-    return { mesh, uniforms };
-  }
-
-  private createGalacticGuide() {
-    const segments = 160;
-    const spanHalf = 5.4;
-    const halfW = 0.11;
-    const slope = 0.48 / 1.45;
-    const positions = new Float32Array((segments + 1) * 2 * 3);
-    const uvs = new Float32Array((segments + 1) * 2 * 2);
-    const indices: number[] = [];
-
-    for (let i = 0; i <= segments; i += 1) {
-      const s = -spanHalf + (i / segments) * spanHalf * 2;
-      const cx = s;
-      const cy = s * slope - 0.012 * s * s;
-      const cz = -0.055 * s * s;
-
-      const tx = 1;
-      const ty = slope - 0.024 * s;
-      const sideLen = Math.hypot(ty, tx) || 1;
-      const sx = (ty / sideLen) * halfW;
-      const sy = (-tx / sideLen) * halfW;
-
-      const v0 = i * 2;
-      const v1 = v0 + 1;
-      positions[v0 * 3] = cx - sx;
-      positions[v0 * 3 + 1] = cy - sy;
-      positions[v0 * 3 + 2] = cz;
-
-      positions[v1 * 3] = cx + sx;
-      positions[v1 * 3 + 1] = cy + sy;
-      positions[v1 * 3 + 2] = cz;
-
-      uvs[v0 * 2] = s;
-      uvs[v0 * 2 + 1] = 0;
-      uvs[v1 * 2] = s;
-      uvs[v1 * 2 + 1] = 1;
-
-      if (i < segments) {
-        const next0 = v0 + 2;
-        const next1 = v0 + 3;
-        indices.push(v0, v1, next0, v1, next1, next0);
-      }
-    }
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
-    geometry.setIndex(indices);
-    this.geometries.push(geometry);
-
-    const uniforms = {
-      uOpacity: { value: 0 },
-      uDrift: { value: 0 },
-    };
-
-    const material = new THREE.ShaderMaterial({
-      vertexShader: galacticGuideVertexShader,
-      fragmentShader: galacticGuideFragmentShader,
-      uniforms,
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    this.materials.push(material);
-
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.renderOrder = 6;
-    mesh.visible = false;
-    return { mesh, uniforms };
-  }
-
-  private createLunarGuide() {
-    const segments = 160;
-    const halfSpan = DAY_GUIDE_HALF_SPAN;
-    const halfW = 0.088;
-    const positions = new Float32Array((segments + 1) * 2 * 3);
-    const uvs = new Float32Array((segments + 1) * 2 * 2);
-    const indices: number[] = [];
-
-    for (let i = 0; i <= segments; i += 1) {
-      const s = -halfSpan + (i / segments) * halfSpan * 2;
-      // Subtle ecliptic arc passing horizontally through the Moon's center
-      const cx = s;
-      const cy = -0.0085 * s * s;
-      const cz = 0;
-
-      const tx = 1;
-      const ty = -0.017 * s;
-      const sideLen = Math.hypot(ty, tx) || 1;
-      const sx = (ty / sideLen) * halfW;
-      const sy = (-tx / sideLen) * halfW;
-
-      const v0 = i * 2;
-      const v1 = v0 + 1;
-      positions[v0 * 3] = cx - sx;
-      positions[v0 * 3 + 1] = cy - sy;
-      positions[v0 * 3 + 2] = cz;
-
-      positions[v1 * 3] = cx + sx;
-      positions[v1 * 3 + 1] = cy + sy;
-      positions[v1 * 3 + 2] = cz;
-
-      uvs[v0 * 2] = s;
-      uvs[v0 * 2 + 1] = 0;
-      uvs[v1 * 2] = s;
-      uvs[v1 * 2 + 1] = 1;
-
-      if (i < segments) {
-        const next0 = v0 + 2;
-        const next1 = v0 + 3;
-        indices.push(v0, v1, next0, v1, next1, next0);
-      }
-    }
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
-    geometry.setIndex(indices);
-    this.geometries.push(geometry);
-
-    const uniforms = {
-      uOpacity: { value: 0 },
-      uSynodicAge: { value: this.smoothDayAge },
-      uMoonClearInner: { value: DAY_MOON_BASE_RADIUS * 1.16 },
-      uMoonClearOuter: { value: DAY_MOON_BASE_RADIUS * 1.56 },
-      uHalfSpan: { value: halfSpan },
-      uDaySpacing: { value: DAY_GUIDE_DAY_SPACING },
-    };
-
-    const material = new THREE.ShaderMaterial({
-      vertexShader: lunarGuideVertexShader,
-      fragmentShader: lunarGuideFragmentShader,
-      uniforms,
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-    });
-    this.materials.push(material);
-
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.position.copy(DAY_MOON_POS);
-    mesh.renderOrder = 6;
-    mesh.visible = false;
-    return { mesh, uniforms };
-  }
-
-  private createCoastalGeometry() {
-    // Non-uniform coastal mesh concentrating vertex density in the foreground swash & surf zone
-    // while extending cleanly out to the distant oceanic horizon (z = -115) and back to z = +5.8
-    // so elevated atmospheric descent/ascent glides never reveal a near or side mesh edge.
-    const segX = 180;
-    const segZ = 168;
-    const cols = segX + 1;
-    const rows = segZ + 1;
-    const positions = new Float32Array(cols * rows * 3);
-    const indices: number[] = [];
-
-    for (let iz = 0; iz <= segZ; iz += 1) {
-      const tz = iz / segZ;
-      // Smooth non-linear depth stretch: very dense near z ∈ [+5.8, -16], wide toward horizon
-      const z = 5.8 - 120.8 * tz ** 2.35;
-      // Horizontal span expands proportionally with perspective depth so full FOV is always covered
-      const depthFromCam = Math.max(2.0, DAY_CAM_LOCAL_POS.z - z);
-      const halfWidth = Math.max(8.5, depthFromCam * 0.78);
-
-      for (let ix = 0; ix <= segX; ix += 1) {
-        const tx = (ix / segX) * 2 - 1;
-        // Slightly denser X resolution near the center & diagonal shoreline
-        const shapedTx = Math.sign(tx) * (Math.abs(tx) * 0.58 + Math.abs(tx) ** 1.65 * 0.42);
-        const x = shapedTx * halfWidth;
-
-        const idx = (iz * cols + ix) * 3;
-        positions[idx] = x;
-        positions[idx + 1] = 0;
-        positions[idx + 2] = z;
-      }
-    }
-
-    for (let iz = 0; iz < segZ; iz += 1) {
-      for (let ix = 0; ix < segX; ix += 1) {
-        const a = iz * cols + ix;
-        const b = a + 1;
-        const c = a + cols;
-        const d = c + 1;
-        // Front face (+Y upward normal): (b - a) x (c - a) = (+X) x (-Z) = +Y
-        indices.push(a, b, c, b, d, c);
-      }
-    }
-
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    geometry.setIndex(indices);
-    // Keep frustum culling disabled since vertex shader displaces surface height dynamically
-    geometry.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, -50), 140);
-    this.geometries.push(geometry);
-    return geometry;
+  setOnContextRestored(listener: (() => void) | null) {
+    this.onContextRestored = listener;
   }
 
   resize(width: number, height: number) {
-    if (this.disposed || width <= 0 || height <= 0) return;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    if (this.disposed || this.contextLost || width <= 0 || height <= 0) return;
+    const dpr = getCappedPixelRatio();
     this.renderer.setPixelRatio(dpr);
     this.renderer.setSize(width, height, false);
     this.camera.aspect = width / height;
@@ -1553,10 +904,17 @@ export class AstroSceneRenderer {
     this.renderSingleFrame();
   }
 
+  private getNeighborMonthIso(deltaMonths: number): string {
+    const cur = this.astroState.date;
+    const anchorDay = this.monthDragAnchorDay ?? cur.day;
+    const nextMonth = ((((cur.month - 1 + deltaMonths) % 12) + 12) % 12) + 1;
+    return formatIsoDate(cur.year, nextMonth, anchorDay);
+  }
+
   private updateMonthNeighbors() {
     const cur = this.astroState;
-    this.nextMonthIso = addDateSegment(cur.isoDate, "month", 1);
-    this.prevMonthIso = addDateSegment(cur.isoDate, "month", -1);
+    this.nextMonthIso = this.getNeighborMonthIso(1);
+    this.prevMonthIso = this.getNeighborMonthIso(-1);
 
     const nextState = computeAstroState(this.nextMonthIso);
     const prevState = computeAstroState(this.prevMonthIso);
@@ -1630,9 +988,14 @@ export class AstroSceneRenderer {
     this.prevDaySwell = prevState.tidal.swellEnergy;
   }
 
-  setMonthDragState(dragging: boolean, fraction: number) {
+  setMonthDragState(dragging: boolean, fraction: number, anchorDay?: number | null) {
     this.monthDragging = dragging;
     this.dragMonthFraction = THREE.MathUtils.clamp(fraction, -1, 1);
+    const nextAnchor = dragging ? (anchorDay ?? this.monthDragAnchorDay) : null;
+    if (nextAnchor !== this.monthDragAnchorDay) {
+      this.monthDragAnchorDay = nextAnchor;
+      this.updateMonthNeighbors();
+    }
   }
 
   setDayDragState(dragging: boolean, fraction: number) {
@@ -1700,7 +1063,7 @@ export class AstroSceneRenderer {
     this.updateMonthNeighbors();
     this.updateDayNeighbors();
 
-    if (!this.active || this.reducedMotion) {
+    if (!this.shouldRunLoop()) {
       if (this.pendingMode !== null) {
         const nextMode = this.pendingMode;
         this.pendingMode = null;
@@ -1910,7 +1273,7 @@ export class AstroSceneRenderer {
   }
 
   private isCurrentValueAnimating(): boolean {
-    if (!this.active || this.reducedMotion) return false;
+    if (!this.shouldRunLoop()) return false;
 
     const monthFraction = this.dragMonthFraction;
     const orbitOffset =
@@ -2002,6 +1365,10 @@ export class AstroSceneRenderer {
     if (mode !== "month") {
       this.monthDragging = false;
       this.dragMonthFraction = 0;
+      if (this.monthDragAnchorDay !== null) {
+        this.monthDragAnchorDay = null;
+        this.updateMonthNeighbors();
+      }
     }
     if (mode !== "day") {
       this.dayDragging = false;
@@ -2015,7 +1382,7 @@ export class AstroSceneRenderer {
       this.swellVelocity = 0;
     }
 
-    if (!this.active || this.reducedMotion) {
+    if (!this.shouldRunLoop()) {
       if (mode === "year") {
         this.setYearYaw(
           prevMode === "day" ? this.dayYaw : Math.atan2(this.camPos.x, this.camPos.z),
@@ -2032,9 +1399,34 @@ export class AstroSceneRenderer {
     this.syncSceneInteractive();
   }
 
+  private shouldRunLoop(): boolean {
+    return (
+      !this.disposed && this.active && this.pageVisible && !this.reducedMotion && !this.contextLost
+    );
+  }
+
+  private stopLoop() {
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+  }
+
+  private syncLoopState() {
+    if (this.shouldRunLoop()) {
+      if (this.rafId === null) {
+        this.lastTime = performance.now();
+        this.rafId = requestAnimationFrame(this.loop);
+      }
+    } else {
+      this.stopLoop();
+    }
+  }
+
   setReducedMotion(reduced: boolean) {
     this.reducedMotion = reduced;
     if (reduced) {
+      this.stopLoop();
       if (this.pendingMode !== null) {
         const nextMode = this.pendingMode;
         this.pendingMode = null;
@@ -2043,36 +1435,34 @@ export class AstroSceneRenderer {
       }
       this.snapToTargets();
       this.renderSingleFrame();
+    } else {
+      this.syncLoopState();
     }
   }
 
   setActive(active: boolean) {
     this.active = active;
-    if (active && !this.disposed && this.rafId === null) {
-      this.lastTime = performance.now();
-      this.rafId = requestAnimationFrame(this.loop);
-    } else if (!active && this.rafId !== null) {
-      cancelAnimationFrame(this.rafId);
-      this.rafId = null;
-    }
+    this.syncLoopState();
+  }
+
+  setPageVisible(visible: boolean) {
+    this.pageVisible = visible;
+    this.syncLoopState();
   }
 
   start() {
-    if (this.disposed || this.rafId !== null) return;
-    this.lastTime = performance.now();
+    if (this.disposed) return;
     this.renderSingleFrame();
-    if (this.active) {
-      this.rafId = requestAnimationFrame(this.loop);
-    }
+    this.syncLoopState();
   }
 
   dispose() {
     this.disposed = true;
     this.onSceneInteractiveChange = null;
-    if (this.rafId !== null) {
-      cancelAnimationFrame(this.rafId);
-      this.rafId = null;
-    }
+    this.onContextRestored = null;
+    this.stopLoop();
+    this.canvas.removeEventListener("webglcontextlost", this.handleContextLost, false);
+    this.canvas.removeEventListener("webglcontextrestored", this.handleContextRestored, false);
     for (const tex of this.textures) tex.dispose();
     for (const geo of this.geometries) geo.dispose();
     for (const mat of this.materials) mat.dispose();
@@ -2084,6 +1474,10 @@ export class AstroSceneRenderer {
     this.syncSceneInteractive();
     this.monthDragging = false;
     this.dragMonthFraction = 0;
+    if (this.monthDragAnchorDay !== null) {
+      this.monthDragAnchorDay = null;
+      this.updateMonthNeighbors();
+    }
     this.dayDragging = false;
     this.dragDayFraction = 0;
 
@@ -2212,7 +1606,7 @@ export class AstroSceneRenderer {
 
     if (!this.flight.active) {
       if (this.mode === "year") {
-        const stepDt = dt || 0.016;
+        const stepDt = dt > 0 ? dt : 0.016;
         this.sunGroup.position.set(
           damp(this.sunGroup.position.x, this.sunYearWorldPos.x, 6, stepDt),
           damp(this.sunGroup.position.y, this.sunYearWorldPos.y, 6, stepDt),
@@ -2530,7 +1924,6 @@ export class AstroSceneRenderer {
     this.galacticGuideUniforms.uDrift.value = this.galacticDustUniforms.uDrift.value;
     this.galacticGuideMesh.visible = this.wYearGuide > 0.005;
 
-    this.skyMesh.quaternion.copy(this.astroSkyQuat);
     this.skyMesh.visible = this.wYearSky < 0.995;
     this.skyGroup.rotation.y = this.smoothPrecession + this.smoothGalLonShift;
     this.skyUniforms.uBrightness.value = this.smoothSkyBright;
@@ -2560,28 +1953,26 @@ export class AstroSceneRenderer {
   }
 
   private renderSingleFrame() {
-    if (this.disposed) return;
+    if (this.disposed || this.contextLost) return;
     this.renderer.render(this.scene, this.camera);
   }
 
   private readonly loop = (now: number) => {
-    if (this.disposed || !this.active) {
+    if (!this.shouldRunLoop()) {
       this.rafId = null;
       return;
     }
 
-    const dt = Math.min((now - this.lastTime) / 1000, 0.05);
+    const dt = clampDeltaTime(now, this.lastTime);
     this.lastTime = now;
-    if (!this.reducedMotion) {
-      this.elapsed += dt;
-    }
+    this.elapsed += dt;
 
-    const orbitLambda = this.reducedMotion ? 60 : this.monthDragging ? 12.5 : 6.5;
-    const dayLambda = this.reducedMotion ? 60 : this.dayDragging ? 18.0 : 9.5;
-    const astroLambda = this.reducedMotion ? 60 : 7.5;
-    const settleLambda = this.reducedMotion ? 60 : 6.0;
+    const orbitLambda = this.monthDragging ? 12.5 : 6.5;
+    const dayLambda = this.dayDragging ? 18.0 : 9.5;
+    const astroLambda = 7.5;
+    const settleLambda = 6.0;
 
-    const dragFraction = this.reducedMotion ? 0 : this.dragMonthFraction;
+    const dragFraction = this.dragMonthFraction;
     const orbitOffset =
       dragFraction >= 0 ? dragFraction * this.nextOrbitDelta : -dragFraction * this.prevOrbitDelta;
     const spinOffset =
@@ -2602,28 +1993,23 @@ export class AstroSceneRenderer {
         : -dragFraction * this.prevMoonRelDelta;
     const targetMoonRelAngle = shortestAngleDelta(0, baseMoonRel + moonRelOffset);
 
-    if (this.reducedMotion) {
-      this.smoothMoonRelAngle = targetMoonRelAngle;
-      this.moonRelVelocity = 0;
-    } else {
-      const [nextMoonRel, nextMoonRelVel] = advanceSmoothAngleLinear(
-        this.smoothMoonRelAngle,
-        targetMoonRelAngle,
-        this.moonRelVelocity,
-        MOON_ORBIT_DRIFT_SPEED,
-        MOON_ORBIT_DRIFT_ACCEL,
-        MOON_ORBIT_ARRIVAL_BAND,
-        dt,
-      );
-      this.smoothMoonRelAngle = nextMoonRel;
-      this.moonRelVelocity = nextMoonRelVel;
-    }
+    const [nextMoonRel, nextMoonRelVel] = advanceSmoothAngleLinear(
+      this.smoothMoonRelAngle,
+      targetMoonRelAngle,
+      this.moonRelVelocity,
+      MOON_ORBIT_DRIFT_SPEED,
+      MOON_ORBIT_DRIFT_ACCEL,
+      MOON_ORBIT_ARRIVAL_BAND,
+      dt,
+    );
+    this.smoothMoonRelAngle = nextMoonRel;
+    this.moonRelVelocity = nextMoonRelVel;
 
     const targetMoonLat =
       dragFraction >= 0
         ? THREE.MathUtils.lerp(this.astroState.lunar.latitudeRad, this.nextMoonLat, dragFraction)
         : THREE.MathUtils.lerp(this.astroState.lunar.latitudeRad, this.prevMoonLat, -dragFraction);
-    this.smoothMoonLat = damp(this.smoothMoonLat, targetMoonLat, this.reducedMotion ? 60 : 3.2, dt);
+    this.smoothMoonLat = damp(this.smoothMoonLat, targetMoonLat, 3.2, dt);
 
     // Keep continuous unwrapped angles bounded once settled to preserve float precision
     if (!this.monthDragging && this.dragMonthFraction === 0) {
@@ -2669,7 +2055,7 @@ export class AstroSceneRenderer {
     }
 
     // 1:1 continuous sub-day lunar phase & guide interpolation during Day dragging
-    const dayFraction = this.reducedMotion ? 0 : this.dragDayFraction;
+    const dayFraction = this.dragDayFraction;
     const dayElongOffset =
       dayFraction >= 0
         ? dayFraction * this.nextDayElongDelta
@@ -2777,39 +2163,33 @@ export class AstroSceneRenderer {
         ? THREE.MathUtils.lerp(this.astroState.tidal.swellEnergy, this.nextDaySwell, dayFraction)
         : THREE.MathUtils.lerp(this.astroState.tidal.swellEnergy, this.prevDaySwell, -dayFraction);
 
-    if (this.reducedMotion) {
-      this.smoothTideLevel = targetTideLevel;
-      this.smoothSwellEnergy = targetSwellEnergy;
-      this.tideVelocity = 0;
-      this.swellVelocity = 0;
-    } else {
-      const [nextTide, nextTideVel] = advanceSmoothLinear(
-        this.smoothTideLevel,
-        targetTideLevel,
-        this.tideVelocity,
-        TIDE_DRIFT_SPEED,
-        TIDE_DRIFT_ACCEL,
-        TIDE_ARRIVAL_BAND,
-        dt,
-      );
-      this.smoothTideLevel = nextTide;
-      this.tideVelocity = nextTideVel;
+    const [nextTide, nextTideVel] = advanceSmoothLinear(
+      this.smoothTideLevel,
+      targetTideLevel,
+      this.tideVelocity,
+      TIDE_DRIFT_SPEED,
+      TIDE_DRIFT_ACCEL,
+      TIDE_ARRIVAL_BAND,
+      dt,
+    );
+    this.smoothTideLevel = nextTide;
+    this.tideVelocity = nextTideVel;
 
-      // Keep swell energy (range 0.25..1.0 = 0.75 * springNeapIndex) paced in exact lockstep with tide
-      const [nextSwell, nextSwellVel] = advanceSmoothLinear(
-        this.smoothSwellEnergy,
-        targetSwellEnergy,
-        this.swellVelocity,
-        TIDE_DRIFT_SPEED * 0.75,
-        TIDE_DRIFT_ACCEL * 0.75,
-        TIDE_ARRIVAL_BAND * 0.75,
-        dt,
-      );
-      this.smoothSwellEnergy = nextSwell;
-      this.swellVelocity = nextSwellVel;
-    }
+    // Keep swell energy (range 0.25..1.0 = 0.75 * springNeapIndex) paced in exact lockstep with tide
+    const [nextSwell, nextSwellVel] = advanceSmoothLinear(
+      this.smoothSwellEnergy,
+      targetSwellEnergy,
+      this.swellVelocity,
+      TIDE_DRIFT_SPEED * 0.75,
+      TIDE_DRIFT_ACCEL * 0.75,
+      TIDE_ARRIVAL_BAND * 0.75,
+      dt,
+    );
+    this.smoothSwellEnergy = nextSwell;
+    this.swellVelocity = nextSwellVel;
+
     // Wet sand dries slower than water recedes, leaving a glistening reflective coastal trail
-    if (this.smoothTideLevel >= this.smoothWetTideMemory || this.reducedMotion) {
+    if (this.smoothTideLevel >= this.smoothWetTideMemory) {
       this.smoothWetTideMemory = this.smoothTideLevel;
     } else {
       this.smoothWetTideMemory = damp(this.smoothWetTideMemory, this.smoothTideLevel, 0.24, dt);
@@ -2824,7 +2204,7 @@ export class AstroSceneRenderer {
     const dEpoch = this.smoothEpochYears - this.prevSmoothEpochYears;
     this.prevSmoothEpochYears = this.smoothEpochYears;
     if (this.mode === "year") {
-      this.smoothGalLonShift += dEpoch * 0.0085 + (this.reducedMotion ? 0 : dt * 0.0022);
+      this.smoothGalLonShift += dEpoch * 0.0085 + dt * 0.0022;
     }
 
     this.smoothPrecession = damp(

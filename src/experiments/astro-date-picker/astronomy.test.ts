@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import {
   addDateSegment,
+  clampIsoDate,
   computeAstroState,
   computeLunarDirectionEcliptic,
   computeLunarSunDirectionObserver,
@@ -10,6 +11,7 @@ import {
   formatIsoDate,
   galacticToEclipticDirection,
   geographicToEclipticNormal,
+  isLeapYear,
   parseIsoDate,
   toJulianDay,
 } from "./astronomy";
@@ -312,9 +314,59 @@ describe("astro astronomy engine", () => {
   });
 
   it("handles proleptic Gregorian daysInMonth accurately for low and century years", () => {
+    expect(isLeapYear(1)).toBe(false);
+    expect(isLeapYear(4)).toBe(true);
+    expect(isLeapYear(100)).toBe(false);
+    expect(isLeapYear(400)).toBe(true);
+    expect(isLeapYear(1900)).toBe(false);
+    expect(isLeapYear(2000)).toBe(true);
     expect(daysInMonth(1, 2)).toBe(28);
     expect(daysInMonth(4, 2)).toBe(29);
     expect(daysInMonth(100, 2)).toBe(28);
     expect(daysInMonth(400, 2)).toBe(29);
+  });
+
+  it("stays finite and physically bounded across extreme ISO dates (0001..9999)", () => {
+    for (const iso of ["0001-01-01", "1600-02-29", "1995-02-16", "2026-06-21", "9999-12-31"]) {
+      const state = computeAstroState(iso);
+      expect(state.isoDate).toBe(iso);
+      expect(Number.isFinite(state.solar.julianDay)).toBe(true);
+      expect(state.solar.earthSunDistanceAU).toBeGreaterThan(0.95);
+      expect(state.solar.earthSunDistanceAU).toBeLessThan(1.05);
+      expect(state.solar.subsolarLonRad).toBeGreaterThanOrEqual(-Math.PI);
+      expect(state.solar.subsolarLonRad).toBeLessThan(Math.PI);
+      expect(state.lunar.illumination).toBeGreaterThanOrEqual(0);
+      expect(state.lunar.illumination).toBeLessThanOrEqual(1);
+      expect(state.lunar.distanceKm).toBeGreaterThan(340_000);
+      expect(state.lunar.distanceKm).toBeLessThan(420_000);
+      expect(state.tidal.springNeapIndex).toBeGreaterThanOrEqual(0);
+      expect(state.tidal.springNeapIndex).toBeLessThanOrEqual(1);
+      expect(state.tidal.waterLevel).toBeGreaterThanOrEqual(-1);
+      expect(state.tidal.waterLevel).toBeLessThanOrEqual(1);
+      expect(Number.isFinite(state.galactic.axialPrecessionRad)).toBe(true);
+    }
+  });
+
+  it("keeps subsolarLonRad strictly within [-PI, PI) across an entire year", () => {
+    for (let month = 1; month <= 12; month += 1) {
+      for (const day of [1, 10, 20, 28]) {
+        const { solar } = computeAstroState(formatIsoDate(2026, month, day));
+        expect(solar.subsolarLonRad).toBeGreaterThanOrEqual(-Math.PI);
+        expect(solar.subsolarLonRad).toBeLessThan(Math.PI);
+      }
+    }
+  });
+
+  it("handles non-finite deltas, min/max bounds, and malformed inputs defensively", () => {
+    expect(addDateSegment("2026-06-15", "year", Number.NaN)).toBe("2026-06-15");
+    expect(addDateSegment("2026-06-15", "month", Number.POSITIVE_INFINITY)).toBe("2026-06-15");
+    expect(addDateSegment("2026-06-15", "day", 1.9)).toBe("2026-06-16");
+    expect(addDateSegment("2026-06-15", "year", 10, "2020-01-01", "2030-12-31")).toBe("2030-12-31");
+    expect(addDateSegment("2026-06-15", "year", -20, "2020-01-01", "2030-12-31")).toBe(
+      "2020-01-01",
+    );
+    expect(clampIsoDate("2026-06-15", "not-a-date", "also-bad")).toBe("2026-06-15");
+    expect(clampIsoDate("2026-06-15", "2030-01-01", "2020-01-01")).toBe("2026-06-15");
+    expect(formatIsoDate(Number.NaN, Number.NaN, Number.NaN)).toBe("0001-01-01");
   });
 });

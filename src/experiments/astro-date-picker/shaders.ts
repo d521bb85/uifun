@@ -59,21 +59,24 @@ void main() {
   float diffuse = max(bumpedNdl, 0.0);
 
   float shadowAtten = 1.0 - cloudShadow * 0.24 * smoothstep(0.0, 0.28, ndl);
-  vec3 litDay = dayColor * (0.06 + 1.38 * pow(diffuse, 0.82)) * shadowAtten;
+  vec3 litDay = dayColor * (0.06 + 1.38 * pow(max(diffuse, 0.0001), 0.82)) * shadowAtten;
 
-  vec3 H = normalize(L + V);
-  float ndh = max(dot(N, H), 0.0);
+  vec3 hRaw = L + V;
+  vec3 H = dot(hRaw, hRaw) > 1e-6 ? normalize(hRaw) : N;
+  float ndh = max(dot(N, H), 0.0001);
   float specSharp = pow(ndh, 90.0) * 0.62;
   float specBroad = pow(ndh, 18.0) * 0.16;
-  float ndv = max(dot(N, V), 0.0);
-  float fresnel = pow(1.0 - ndv, 3.8);
+  float ndv = clamp(dot(N, V), 0.0, 1.0);
+  float invNdv = max(1.0 - ndv, 0.0001);
+  float fresnel = pow(invNdv, 3.8);
   vec3 oceanSpec = vec3(1.0, 0.96, 0.9) * (specSharp + specBroad) * oceanMask * smoothstep(0.02, 0.26, ndl) * (1.0 - cloudDensity * 0.82);
   vec3 oceanFresnel = vec3(0.14, 0.42, 0.82) * fresnel * oceanMask * 0.42 * dayFactor;
 
-  float terminatorBand = exp(-pow((ndl + 0.015) / 0.048, 2.0));
+  float termDist = (ndl + 0.015) / 0.048;
+  float terminatorBand = exp(-(termDist * termDist));
   vec3 twilightTint = vec3(0.95, 0.42, 0.18) * terminatorBand * 0.12 * (1.0 - cloudDensity * 0.4);
 
-  float limbScatter = pow(1.0 - ndv, 3.1) * smoothstep(-0.14, 0.3, ndl);
+  float limbScatter = pow(invNdv, 3.1) * smoothstep(-0.14, 0.3, ndl);
   vec3 rayleigh = vec3(0.24, 0.6, 1.0) * limbScatter * 0.72;
 
   float nightFactor = smoothstep(0.06, -0.18, ndl);
@@ -86,7 +89,7 @@ void main() {
   vec3 nightAmbient = mix(nightLand, nightOcean, oceanMask) * (0.45 + 0.55 * nightFactor);
 
   // Subtle cool atmospheric rim along the dark limb so Earth's spherical outline stays clearly defined
-  float nightLimb = pow(1.0 - ndv, 2.8) * (1.0 - dayFactor * 0.85);
+  float nightLimb = pow(invNdv, 2.8) * (1.0 - dayFactor * 0.85);
   vec3 nightRim = vec3(0.16, 0.33, 0.62) * nightLimb * 0.48;
 
   vec3 color = mix(nightAmbient + cityGlow, litDay + oceanSpec + oceanFresnel, dayFactor) + twilightTint + rayleigh + nightRim;
@@ -128,13 +131,15 @@ void main() {
   vec3 V = normalize(cameraPosition - vWorldPos);
   vec3 L = normalize(uSunDir);
   float ndl = dot(N, L);
-  float ndv = max(dot(N, V), 0.0);
+  float ndv = clamp(dot(N, V), 0.0, 1.0);
+  float invNdv = max(1.0 - ndv, 0.0001);
 
   float lit = smoothstep(-0.1, 0.24, ndl);
-  float sunset = exp(-pow((ndl + 0.01) / 0.055, 2.0));
-  vec3 dayCol = vec3(0.97, 0.99, 1.0) * (0.24 + 0.95 * pow(max(ndl, 0.0), 0.78));
+  float sunsetDist = (ndl + 0.01) / 0.055;
+  float sunset = exp(-(sunsetDist * sunsetDist));
+  vec3 dayCol = vec3(0.97, 0.99, 1.0) * (0.24 + 0.95 * pow(max(ndl, 0.0001), 0.78));
   vec3 sunsetCol = vec3(1.0, 0.56, 0.28) * sunset * 0.16;
-  vec3 nightCol = vec3(0.055, 0.085, 0.145) + vec3(0.04, 0.075, 0.14) * pow(1.0 - ndv, 2.4);
+  vec3 nightCol = vec3(0.055, 0.085, 0.145) + vec3(0.04, 0.075, 0.14) * pow(invNdv, 2.4);
 
   vec3 color = mix(nightCol, dayCol, lit) + sunsetCol;
   gl_FragColor = vec4(color, alpha * uOpacity);
@@ -165,13 +170,14 @@ void main() {
   vec3 V = normalize(cameraPosition - vWorldPos);
   vec3 L = normalize(uSunDir);
 
-  float viewDot = max(dot(-N, V), 0.0);
-  float rim = pow(clamp(1.0 - viewDot, 0.0, 1.0), 3.3);
+  float viewDot = clamp(dot(-N, V), 0.0, 1.0);
+  float rim = pow(max(1.0 - viewDot, 0.0001), 3.3);
   float outerFalloff = smoothstep(0.0, 0.36, viewDot);
 
   float ndl = dot(N, L);
   float sunMask = smoothstep(-0.26, 0.36, ndl);
-  float sunsetBand = exp(-pow((ndl + 0.02) / 0.12, 2.0));
+  float sunsetDist = (ndl + 0.02) / 0.12;
+  float sunsetBand = exp(-(sunsetDist * sunsetDist));
 
   vec3 dayHalo = vec3(0.24, 0.62, 1.0);
   vec3 nightHalo = vec3(0.14, 0.32, 0.64);
@@ -250,10 +256,11 @@ void main() {
 
   // Cool slate-blue Earthshine illuminating the dark lunar disk so even New Moon reads subtly
   float darkSide = 1.0 - smoothstep(-0.08, 0.14, geomNdl);
-  float rimSoft = 0.7 + 0.35 * pow(1.0 - max(dot(N, V), 0.0), 2.2);
+  float geomInvNdv = max(1.0 - clamp(dot(N, V), 0.0, 1.0), 0.0001);
+  float rimSoft = 0.7 + 0.35 * pow(geomInvNdv, 2.2);
   vec3 earthshineCol =
     albedo * vec3(0.14, 0.2, 0.32) * (0.14 + 0.34 * uEarthshine) * darkSide * rimSoft +
-    vec3(0.04, 0.07, 0.13) * pow(1.0 - max(dot(N, V), 0.0), 3.6) * darkSide * (0.35 + 0.65 * uEarthshine);
+    vec3(0.04, 0.07, 0.13) * pow(geomInvNdv, 3.6) * darkSide * (0.35 + 0.65 * uEarthshine);
 
   vec3 color = sunlit + earthshineCol;
   gl_FragColor = vec4(color, uOpacity);
@@ -382,7 +389,8 @@ float beachBedHeight(float s) {
 
 float evalOceanWaves(float s, float sRel, float along, float t, float swellEnergy, out float crestOut) {
   // Waves compress slightly and shoal as they approach the beach (sRel -> 0)
-  float shoalBoost = 1.0 + 0.42 * exp(-pow((sRel + 1.15) / 0.95, 2.0));
+  float shoalArg = (sRel + 1.15) / 0.95;
+  float shoalBoost = 1.0 + 0.42 * exp(-(shoalArg * shoalArg));
   float shoreAtten = smoothstep(0.18, -0.58, sRel);
   float amp = (0.024 + 0.048 * swellEnergy) * shoalBoost * shoreAtten;
 
@@ -401,7 +409,8 @@ float evalOceanWaves(float s, float sRel, float along, float t, float swellEnerg
 
   float total = w1 + w2 + w3;
   // Breaking crest energy peaks in the shallow surf zone in organic along-shore pockets
-  float breakerZone = exp(-pow((sRel + 1.15) / 0.78, 2.0));
+  float breakerArg = (sRel + 1.15) / 0.78;
+  float breakerZone = exp(-(breakerArg * breakerArg));
   float alongBreak = 0.62 + 0.38 * sin(along * 0.58 + 0.9) * cos(along * 0.27 - t * 0.09);
   crestOut = clamp((w1 / max(amp, 0.001) - 0.24) * 1.32, 0.0, 1.0) * breakerZone * alongBreak;
   return total;
@@ -473,7 +482,9 @@ varying float vWaveCrest;
 varying float vWaveHeight;
 
 float hash(vec2 p) {
-  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
 }
 
 float noise(vec2 p) {
@@ -568,10 +579,12 @@ float waveField(vec2 p, float t) {
 }
 
 void main() {
+  float distZ = max(0.0, 2.0 - vLocalPos.z);
+  if (distZ >= 114.0) discard;
+
   vec2 xz = vLocalPos.xz;
   vec3 localToCam = uLocalCamPos - vLocalPos;
   float distCam = length(localToCam);
-  float distZ = max(0.0, 2.0 - vLocalPos.z);
 
   float shoreX = shoreCenterX(vLocalPos.z);
   float s = (vLocalPos.x - shoreX) * 0.946;
@@ -644,7 +657,8 @@ void main() {
     float innerAdvance = isInner * smoothstep(0.04, 0.34, vel) * smoothstep(0.06, 0.30, reach);
 
     // Subtle micro contact shadow on dry/wet sand ONLY ahead of the outermost water-to-sand lip
-    float shadow = exp(-pow((distBehind + 0.008) / 0.016, 2.0))
+    float shadowArg = (distBehind + 0.008) / 0.016;
+    float shadow = exp(-(shadowArg * shadowArg))
       * (0.22 + 0.78 * smoothstep(-0.25, 0.45, vel)) * isOuter;
     contactShadow = max(contactShadow, shadow);
 
@@ -652,17 +666,21 @@ void main() {
       // Thin physical water film tapering smoothly into a curved liquid meniscus at the outer shoreline
       float sheet = smoothstep(0.0, 0.26, distBehind) * (0.011 + 0.022 * reach * (0.42 + 0.58 * uSwellEnergy));
       // Tiny raised capillary lip at the outer sand boundary + broader rolling water step on an advancing inner bore
-      float outerLip = exp(-pow((distBehind - 0.024) / 0.026, 2.0)) * (0.0028 + 0.0050 * uprush) * isOuter;
-      float innerRoll = exp(-pow((distBehind - 0.060) / 0.085, 2.0)) * 0.0055 * innerAdvance;
+      float outerLipArg = (distBehind - 0.024) / 0.026;
+      float innerRollArg = (distBehind - 0.060) / 0.085;
+      float outerLip = exp(-(outerLipArg * outerLipArg)) * (0.0028 + 0.0050 * uprush) * isOuter;
+      float innerRoll = exp(-(innerRollArg * innerRollArg)) * 0.0055 * innerAdvance;
       float layerDepth = sheet + (outerLip + innerRoll) * smoothstep(-0.01, 0.02, distBehind);
       swashDepth = max(swashDepth, layerDepth);
 
       // Curved 3D wave slope:
       // - Outer wave: crisp narrow liquid lip catching lunar glint on sand
       // - Inner advancing roller: softer, broader rolling swell front catching gentle moonlight
-      float outerSlope = -((distBehind - 0.024) / 0.024) * exp(-pow((distBehind - 0.024) / 0.024, 2.0))
+      float outerSlopeArg = (distBehind - 0.024) / 0.024;
+      float innerSlopeArg = (distBehind - 0.065) / 0.078;
+      float outerSlope = -outerSlopeArg * exp(-(outerSlopeArg * outerSlopeArg))
         * (0.26 + 0.74 * uprush) * isOuter;
-      float innerSlope = -((distBehind - 0.065) / 0.078) * exp(-pow((distBehind - 0.065) / 0.078, 2.0))
+      float innerSlope = -innerSlopeArg * exp(-(innerSlopeArg * innerSlopeArg))
         * 0.52 * innerAdvance;
       float combinedSlope = outerSlope + innerSlope;
       if (abs(combinedSlope) > abs(meniscusSlope)) {
@@ -670,7 +688,8 @@ void main() {
       }
 
       // Razor-thin specular meniscus ONLY at the outer water-meets-sand boundary
-      float rim = exp(-pow((distBehind - 0.022) / 0.020, 2.0))
+      float rimArg = (distBehind - 0.022) / 0.020;
+      float rim = exp(-(rimArg * rimArg))
         * (0.20 + 0.80 * smoothstep(-0.35, 0.45, vel)) * isOuter;
       meniscusRim = max(meniscusRim, rim);
 
@@ -681,10 +700,12 @@ void main() {
       leadingFoam = max(leadingFoam, lipBand * lipStrength);
 
       // Soft, organically feathered tumbling whitewater bore for an incoming lower wave rolling over backwash
-      float boreFront = smoothstep(-0.045, 0.075, distBehind)
-        * exp(-max(distBehind - 0.055, 0.0) / (0.20 + 0.12 * uprush));
-      float boreAlongVar = 0.48 + 0.52 * fbm(vec2(along * 0.62 + fk * 3.7, uTime * 0.055 + fk * 1.9));
-      innerBoreFoam = max(innerBoreFoam, boreFront * boreAlongVar * innerAdvance * (0.45 + 0.55 * uSwellEnergy));
+      if (innerAdvance > 0.001) {
+        float boreFront = smoothstep(-0.045, 0.075, distBehind)
+          * exp(-max(distBehind - 0.055, 0.0) / (0.20 + 0.12 * uprush));
+        float boreAlongVar = 0.48 + 0.52 * fbm(vec2(along * 0.62 + fk * 3.7, uTime * 0.055 + fk * 1.9));
+        innerBoreFoam = max(innerBoreFoam, boreFront * boreAlongVar * innerAdvance * (0.45 + 0.55 * uSwellEnergy));
+      }
 
       // Delicate gossamer trailing foam web dragged across the shallow water sheet
       float trailBand = smoothstep(0.02, 0.14, distBehind) * exp(-max(distBehind - 0.12, 0.0) / 0.46);
@@ -707,6 +728,8 @@ void main() {
 
   vec3 V = normalize(localToCam);
   vec3 L = normalize(uMoonDir);
+  vec3 lvSum = L + V;
+  vec3 halfVec = dot(lvSum, lvSum) > 1e-6 ? normalize(lvSum) : vec3(0.0, 1.0, 0.0);
   float illumPow = pow(clamp(uMoonIllumination, 0.0001, 1.0), 0.85);
   // Directional moonlight specular (glitter path & wet-sand glint) drops realistically near zero at New Moon,
   // while cool starlight ambient keeps waves, foam edge, and beach delicately readable at all phases.
@@ -714,120 +737,138 @@ void main() {
   float moonBright = 0.10 + 0.90 * illumPow;
   vec3 moonColor = vec3(0.88, 0.93, 1.0);
   vec3 starAmbient = vec3(0.085, 0.125, 0.195);
+  vec3 skyGrad = mix(vec3(0.036, 0.062, 0.112), vec3(0.145, 0.228, 0.365), 0.16 + 0.84 * uMoonIllumination);
 
   // ---------------- SAND & GLOSSY WET BEACH ----------------
-  // Wet sand envelope: recently washed swash zone + slower receding tidal memory pinned to world sand
-  float wetMemoryExtra = max(uWetTideMemory - uTideLevel, 0.0) * 2.26;
-  float wetNoise = (fbm(vec2(along * 0.95, s * 1.4)) - 0.5) * 0.18;
-  float wetLimitS = peakReachEnv + 0.18 + wetMemoryExtra + wetNoise;
-  float wetness = smoothstep(wetLimitS + 0.28, wetLimitS - 0.08, sRel);
-  float dampness = smoothstep(wetLimitS + 0.92, wetLimitS - 0.05, sRel);
+  // Skip sand micro-grain evaluation in deep open water where Beer-Lambert transmittance is <0.0001
+  vec3 sandColor = vec3(0.0);
+  if (waterDepth <= 0.25) {
+    // Wet sand envelope: recently washed swash zone + slower receding tidal memory pinned to world sand
+    float wetMemoryExtra = max(uWetTideMemory - uTideLevel, 0.0) * 2.26;
+    float wetNoise = (fbm(vec2(along * 0.95, s * 1.4)) - 0.5) * 0.18;
+    float wetLimitS = peakReachEnv + 0.18 + wetMemoryExtra + wetNoise;
+    float wetness = smoothstep(wetLimitS + 0.28, wetLimitS - 0.08, sRel);
+    float dampness = smoothstep(wetLimitS + 0.92, wetLimitS - 0.05, sRel);
 
-  // Fine coastal sand micro-grain & subtle wet wave-wash undulations so reflections look organic, not plastic
-  float sandGrain1 = noise(xz * 18.0);
-  float sandGrain2 = noise(xz * 54.0 + 3.1);
-  float sandRipple = noise(vec2(along * 2.2, s * 6.5));
-  float wetMicro1 = noise(vec2(along * 5.2, s * 14.0)) - 0.5;
-  float wetMicro2 = noise(vec2(along * 15.0 + 2.3, s * 28.0)) - 0.5;
-  float slopeX = 0.072 * 0.946;
-  float slopeZ = 0.072 * 0.322;
-  vec3 sandN = normalize(vec3(
-    -slopeX + ((sandGrain1 - 0.5) * 0.055 * (1.0 - wetness * 0.62) + (wetMicro1 * 0.042 + wetMicro2 * 0.022) * wetness) * detailFade,
-    1.0,
-    -slopeZ + ((sandGrain2 - 0.5) * 0.055 * (1.0 - wetness * 0.62) + (wetMicro2 * 0.038 - wetMicro1 * 0.024) * wetness) * detailFade
-  ));
+    // Fine coastal sand micro-grain & subtle wet wave-wash undulations so reflections look organic, not plastic
+    float sandGrain1 = noise(xz * 18.0);
+    float sandGrain2 = noise(xz * 54.0 + 3.1);
+    float sandRipple = noise(vec2(along * 2.2, s * 6.5));
+    float wetMicro1 = noise(vec2(along * 5.2, s * 14.0)) - 0.5;
+    float wetMicro2 = noise(vec2(along * 15.0 + 2.3, s * 28.0)) - 0.5;
+    float slopeX = 0.072 * 0.946;
+    float slopeZ = 0.072 * 0.322;
+    vec3 sandN = normalize(vec3(
+      -slopeX + ((sandGrain1 - 0.5) * 0.055 * (1.0 - wetness * 0.62) + (wetMicro1 * 0.042 + wetMicro2 * 0.022) * wetness) * detailFade,
+      1.0,
+      -slopeZ + ((sandGrain2 - 0.5) * 0.055 * (1.0 - wetness * 0.62) + (wetMicro2 * 0.038 - wetMicro1 * 0.024) * wetness) * detailFade
+    ));
 
-  // Dark coastal sand palette calibrated for ACESFilmic + sRGB + corner scrim readability
-  vec3 drySandAlbedo = vec3(0.076, 0.082, 0.098) * (0.85 + 0.30 * sandRipple) + (sandGrain2 - 0.5) * 0.010;
-  vec3 wetSandAlbedo = drySandAlbedo * vec3(0.46, 0.51, 0.62);
-  vec3 sandAlbedo = mix(drySandAlbedo, wetSandAlbedo, clamp(wetness * 0.85 + dampness * 0.35, 0.0, 1.0));
+    // Dark coastal sand palette calibrated for ACESFilmic + sRGB + corner scrim readability
+    vec3 drySandAlbedo = vec3(0.076, 0.082, 0.098) * (0.85 + 0.30 * sandRipple) + (sandGrain2 - 0.5) * 0.010;
+    vec3 wetSandAlbedo = drySandAlbedo * vec3(0.46, 0.51, 0.62);
+    vec3 sandAlbedo = mix(drySandAlbedo, wetSandAlbedo, clamp(wetness * 0.85 + dampness * 0.35, 0.0, 1.0));
 
-  float sandNdl = max(dot(sandN, L), 0.0);
-  vec3 sandDiffuse = sandAlbedo * (starAmbient * 1.55 + moonColor * (0.30 + 1.10 * sandNdl) * moonBright);
+    float sandNdl = max(dot(sandN, L), 0.0);
+    vec3 sandDiffuse = sandAlbedo * (starAmbient * 1.55 + moonColor * (0.30 + 1.10 * sandNdl) * moonBright);
 
-  // Silky Fresnel sheen on freshly washed wet sand (reflects Moon & night sky with organic sand micro-texture)
-  float sandFresnel = pow(clamp(1.0 - max(dot(sandN, V), 0.0), 0.0001, 1.0), 3.6);
-  vec3 skyGrad = mix(vec3(0.036, 0.062, 0.112), vec3(0.145, 0.228, 0.365), 0.16 + 0.84 * uMoonIllumination);
-  vec3 sandHalfVec = normalize(L + V);
-  float sandNdh = max(dot(sandN, sandHalfVec), 0.0001);
-  // Subtle broken specular reflection on damp/wet sand directly under the Moon
-  float wetSpecBreakup = 0.72 + 0.42 * noise(vec2(along * 3.8, s * 9.5));
-  float wetMoonSpec = (pow(sandNdh, 140.0) * 0.92 + pow(sandNdh, 26.0) * 0.24) * moonSpecBright * wetSpecBreakup;
-  float dampMoonSpec = pow(sandNdh, 16.0) * 0.085 * moonSpecBright;
-  vec3 wetReflect = skyGrad * (0.14 + 0.74 * sandFresnel) + moonColor * wetMoonSpec;
+    // Silky Fresnel sheen on freshly washed wet sand (reflects Moon & night sky with organic sand micro-texture)
+    float sandFresnel = pow(clamp(1.0 - clamp(dot(sandN, V), 0.0, 1.0), 0.0001, 1.0), 3.6);
+    float sandNdh = max(dot(sandN, halfVec), 0.0001);
+    // Subtle broken specular reflection on damp/wet sand directly under the Moon
+    float wetSpecBreakup = 0.72 + 0.42 * noise(vec2(along * 3.8, s * 9.5));
+    float wetMoonSpec = (pow(sandNdh, 140.0) * 0.92 + pow(sandNdh, 26.0) * 0.24) * moonSpecBright * wetSpecBreakup;
+    float dampMoonSpec = pow(sandNdh, 16.0) * 0.085 * moonSpecBright;
+    vec3 wetReflect = skyGrad * (0.14 + 0.74 * sandFresnel) + moonColor * wetMoonSpec;
 
-  vec3 sandColor = sandDiffuse
-    + wetReflect * wetness * 0.86
-    + (skyGrad * 0.14 + moonColor * dampMoonSpec) * dampness * (1.0 - wetness);
-  // Crisp micro contact darkening right ahead of the advancing liquid lip
-  sandColor *= 1.0 - contactShadow * 0.28;
+    sandColor = sandDiffuse
+      + wetReflect * wetness * 0.86
+      + (skyGrad * 0.14 + moonColor * dampMoonSpec) * dampness * (1.0 - wetness);
+    // Crisp micro contact darkening right ahead of the advancing liquid lip
+    sandColor *= 1.0 - contactShadow * 0.28;
+  }
 
   // ---------------- OCEAN WATER & SWASH FILM ----------------
-  // Anisotropic wave ripples attenuate gracefully in ultra-thin swash film
-  float rippleScale = mix(0.28, 1.0, smoothstep(0.002, 0.06, waterDepth));
-  float h0 = waveField(xz, uTime);
-  float hx = waveField(xz + vec2(eps, 0.0), uTime);
-  float hz = waveField(xz + vec2(0.0, eps), uTime);
+  float waterMask = smoothstep(0.0003, 0.0052, waterDepth);
+  vec3 waterColor = sandColor;
+  float ndh = max(dot(vec3(0.0, 1.0, 0.0), halfVec), 0.0001);
 
-  float choppiness = (0.14 + 0.19 * uSwellEnergy) * rippleScale * mix(1.0, 0.45, clamp(distCam / 26.0, 0.0, 1.0));
-  // Combine sculpted macro swell slopes + capillary ripples + curved swash meniscus lip
-  vec2 meniscusTilt = vec2(0.946, 0.322) * meniscusSlope * 0.36;
-  vec2 macroSlope = vWaveSlope * smoothstep(0.004, 0.075, waterDepth) * 1.45;
-  vec3 waterN = normalize(vec3(
-    macroSlope.x + (h0 - hx) / eps * choppiness + meniscusTilt.x,
-    1.0,
-    macroSlope.y + (h0 - hz) / eps * choppiness + meniscusTilt.y
-  ));
+  if (waterMask > 0.001) {
+    // Anisotropic wave ripples attenuate gracefully in ultra-thin swash film
+    float rippleScale = mix(0.28, 1.0, smoothstep(0.002, 0.06, waterDepth));
+    float h0 = waveField(xz, uTime);
+    float hx = waveField(xz + vec2(eps, 0.0), uTime);
+    float hz = waveField(xz + vec2(0.0, eps), uTime);
 
-  // Physical Schlick Fresnel for water (F0 = 0.02)
-  float ndv = max(dot(waterN, V), 0.0);
-  float fresnel = 0.02 + 0.98 * pow(clamp(1.0 - ndv, 0.0001, 1.0), 4.6);
+    float choppiness = (0.14 + 0.19 * uSwellEnergy) * rippleScale * mix(1.0, 0.45, clamp(distCam / 26.0, 0.0, 1.0));
+    // Combine sculpted macro swell slopes + capillary ripples + curved swash meniscus lip
+    vec2 meniscusTilt = vec2(0.946, 0.322) * meniscusSlope * 0.36;
+    vec2 macroSlope = vWaveSlope * smoothstep(0.004, 0.075, waterDepth) * 1.45;
+    vec3 waterN = normalize(vec3(
+      macroSlope.x + (h0 - hx) / eps * choppiness + meniscusTilt.x,
+      1.0,
+      macroSlope.y + (h0 - hz) / eps * choppiness + meniscusTilt.y
+    ));
 
-  // Beer-Lambert shallow water transmittance: thin swash reveals darkened wet sand underneath
-  float transmittance = exp(-waterDepth * 38.0);
-  vec3 deepWaterCol = vec3(0.007, 0.017, 0.038);
-  vec3 shallowTint = vec3(0.014, 0.034, 0.062);
-  vec3 waterBody = mix(deepWaterCol, shallowTint, smoothstep(0.18, 0.01, waterDepth));
-  vec3 underWater = mix(waterBody, sandColor * 0.78, transmittance * 0.86);
+    // Physical Schlick Fresnel for water (F0 = 0.02)
+    float ndv = clamp(dot(waterN, V), 0.0, 1.0);
+    float fresnel = 0.02 + 0.98 * pow(clamp(1.0 - ndv, 0.0001, 1.0), 4.6);
 
-  vec3 waterColor = mix(underWater, skyGrad, clamp(fresnel * 0.84, 0.0, 1.0));
+    // Beer-Lambert shallow water transmittance: thin swash reveals darkened wet sand underneath
+    float transmittance = exp(-waterDepth * 38.0);
+    vec3 deepWaterCol = vec3(0.007, 0.017, 0.038);
+    vec3 shallowTint = vec3(0.014, 0.034, 0.062);
+    vec3 waterBody = mix(deepWaterCol, shallowTint, smoothstep(0.18, 0.01, waterDepth));
+    vec3 underWater = mix(waterBody, sandColor * 0.78, transmittance * 0.86);
 
-  // Multi-lobe anisotropic moonlight glitter path across waves & thin swash
-  vec3 waterH = normalize(L + V);
-  float ndh = max(dot(waterN, waterH), 0.0001);
-  float glitterPin = pow(ndh, 380.0) * 3.5;
-  float glitterMid = pow(ndh, 76.0) * 0.66;
-  float glitterWide = pow(ndh, 15.0) * 0.14;
-  // Soften pin-glitter slightly in smooth glassy swash film while keeping meniscus highlight crisp
-  float glitterMask = mix(0.65, 1.0, rippleScale);
-  waterColor += moonColor * (glitterPin * glitterMask + glitterMid + glitterWide) * moonSpecBright;
-  waterColor += moonColor * meniscusRim * (0.12 + 0.58 * moonSpecBright) * (0.35 + 0.65 * pow(ndh, 10.0));
+    waterColor = mix(underWater, skyGrad, clamp(fresnel * 0.84, 0.0, 1.0));
 
-  // Subtle moonlit translucency / subsurface glow on shoaling wave crests
-  float sssCrest = smoothstep(0.014, 0.052, vWaveHeight) * (0.28 + 0.72 * uSwellEnergy) * (0.22 + 0.78 * moonBright);
-  waterColor += vec3(0.12, 0.24, 0.40) * sssCrest * 0.40;
+    // Multi-lobe anisotropic moonlight glitter path across waves & thin swash
+    ndh = max(dot(waterN, halfVec), 0.0001);
+    float glitterPin = pow(ndh, 380.0) * 3.5;
+    float glitterMid = pow(ndh, 76.0) * 0.66;
+    float glitterWide = pow(ndh, 15.0) * 0.14;
+    // Soften pin-glitter slightly in smooth glassy swash film while keeping meniscus highlight crisp
+    float glitterMask = mix(0.65, 1.0, rippleScale);
+    waterColor += moonColor * (glitterPin * glitterMask + glitterMid + glitterWide) * moonSpecBright;
+    waterColor += moonColor * meniscusRim * (0.12 + 0.58 * moonSpecBright) * (0.35 + 0.65 * pow(ndh, 10.0));
+
+    // Subtle moonlit translucency / subsurface glow on shoaling wave crests
+    float sssCrest = smoothstep(0.014, 0.052, vWaveHeight) * (0.28 + 0.72 * uSwellEnergy) * (0.22 + 0.78 * moonBright);
+    waterColor += vec3(0.12, 0.24, 0.40) * sssCrest * 0.40;
+  }
 
   // ---------------- LACY SEAFOAM & SHOREBREAK ----------------
-  // World-space foam coordinates drifting gently shoreward so tide-level shifts never slide foam like a decal
-  vec2 foamUv = vec2(along * 1.15, s * 2.1 - uTime * 0.10);
-  float lace = foamLace(foamUv, uTime);
-  float fineBubbles = noise(foamUv * 9.5 + vec2(uTime * 0.06, 0.0));
+  float edgeFoamMask = 0.0;
+  float rimSpark = 0.0;
+  float innerBoreMask = 0.0;
+  float trailFoamMask = 0.0;
+  float breakerFoam = 0.0;
 
-  // 1) Crisp lacy foam along the outer swash leading edge where the wave meets sand
-  float edgeFoamMask = leadingFoam * smoothstep(0.12, 0.72, lace * 0.8 + fineBubbles * 0.25);
-  // Continuous ultra-thin bubbly rim right at the outer advancing lip
-  float rimSpark = leadingFoam * smoothstep(0.32, 0.84, leadingFoam + fineBubbles * 0.28) * 0.54;
+  if (leadingFoam + innerBoreFoam + trailFoam > 0.001) {
+    // World-space foam coordinates drifting gently shoreward so tide-level shifts never slide foam like a decal
+    vec2 foamUv = vec2(along * 1.15, s * 2.1 - uTime * 0.10);
+    float lace = foamLace(foamUv, uTime);
+    float fineBubbles = noise(foamUv * 9.5 + vec2(uTime * 0.06, 0.0));
 
-  // 2) Soft, organically broken frothy whitewater on an incoming lower roller gliding over thin backwash
-  float boreTexture = smoothstep(0.24, 0.80, lace * 0.72 + fineBubbles * 0.32);
-  float innerBoreMask = innerBoreFoam * boreTexture * 0.68;
+    // 1) Crisp lacy foam along the outer swash leading edge where the wave meets sand
+    edgeFoamMask = leadingFoam * smoothstep(0.12, 0.72, lace * 0.8 + fineBubbles * 0.25);
+    // Continuous ultra-thin bubbly rim right at the outer advancing lip
+    rimSpark = leadingFoam * smoothstep(0.32, 0.84, leadingFoam + fineBubbles * 0.28) * 0.54;
 
-  // 3) Gossamer trailing foam lace across the shallow swash sheet
-  float trailFoamMask = trailFoam * smoothstep(0.42, 0.86, lace) * 0.64;
+    // 2) Soft, organically broken frothy whitewater on an incoming lower roller gliding over thin backwash
+    float boreTexture = smoothstep(0.24, 0.80, lace * 0.72 + fineBubbles * 0.32);
+    innerBoreMask = innerBoreFoam * boreTexture * 0.68;
+
+    // 3) Gossamer trailing foam lace across the shallow swash sheet
+    trailFoamMask = trailFoam * smoothstep(0.42, 0.86, lace) * 0.64;
+  }
 
   // 4) Soft shorebreak whitewater on shoaling crests in the surf zone
-  float breakerNoise = foamLace(vec2(along * 0.85, s * 1.35 - uTime * 0.16), uTime);
-  float breakerFoam = vWaveCrest * (0.32 + 0.68 * uSwellEnergy) * smoothstep(0.30, 0.80, breakerNoise) * 0.68;
+  if (vWaveCrest > 0.005) {
+    float breakerNoise = foamLace(vec2(along * 0.85, s * 1.35 - uTime * 0.16), uTime);
+    breakerFoam = vWaveCrest * (0.32 + 0.68 * uSwellEnergy) * smoothstep(0.30, 0.80, breakerNoise) * 0.68;
+  }
 
   float totalFoam = clamp(
     max(max(edgeFoamMask, rimSpark), max(max(innerBoreMask, trailFoamMask), breakerFoam)),
@@ -843,8 +884,6 @@ void main() {
   foamLit += moonColor * pow(ndh, 24.0) * 0.28 * moonSpecBright;
   waterColor = mix(waterColor, foamLit, totalFoam * 0.88);
 
-  // Smooth, sub-pixel anti-aliased water-to-sand boundary (zero hard seams!)
-  float waterMask = smoothstep(0.0003, 0.0052, waterDepth);
   // Allow delicate dry-edge foam wisps right at the very front of the meniscus
   float lipFoamOverSand = clamp(edgeFoamMask * 0.55, 0.0, 1.0) * (1.0 - waterMask);
   vec3 finalColor = mix(sandColor, waterColor, waterMask);
@@ -853,7 +892,8 @@ void main() {
   // Atmospheric night marine haze blending the distant ocean softly into the dark starry horizon
   float horizonBlend = smoothstep(22.0, 104.0, distZ);
   vec3 horizonSky = mix(vec3(0.005, 0.010, 0.022), vec3(0.018, 0.032, 0.056), 0.14 + 0.86 * uMoonIllumination);
-  float horizonGlow = exp(-pow((distZ - 58.0) / 30.0, 2.0)) * (0.014 + 0.042 * moonSpecBright);
+  float horizonArg = (distZ - 58.0) / 30.0;
+  float horizonGlow = exp(-(horizonArg * horizonArg)) * (0.014 + 0.042 * moonSpecBright);
   finalColor = mix(finalColor, horizonSky, horizonBlend * 0.94) + vec3(0.12, 0.21, 0.36) * horizonGlow;
 
   // Feather extreme far edge smoothly into skybox so there is never a harsh razor horizon step
@@ -890,8 +930,8 @@ void main() {
   vec2 uv2 = vec2(fract(vUv.x - uTime * 0.0028 + 0.37), clamp(vUv.y + sin(uTime * 0.09) * 0.004, 0.001, 0.999));
   vec3 tex = texture2D(uSunMap, uv1).rgb * 0.65 + texture2D(uSunMap, uv2).rgb * 0.35;
 
-  float ndv = max(dot(normalize(vNormal), normalize(vViewDir)), 0.0);
-  float limbDarkening = pow(ndv, 0.36);
+  float ndv = clamp(dot(normalize(vNormal), normalize(vViewDir)), 0.0, 1.0);
+  float limbDarkening = pow(max(ndv, 0.0001), 0.36);
   float pulse = 1.0 + 0.065 * sin(uTime * 0.62) + 0.032 * sin(uTime * 1.17 + 1.4);
   vec3 coreCol = vec3(2.2, 1.92, 1.48) * pulse;
   vec3 limbCol = vec3(1.35, 0.62, 0.18) * (0.94 + 0.09 * pulse);
@@ -899,9 +939,10 @@ void main() {
   vec3 color = mix(limbCol, coreCol, limbDarkening) * (0.78 + 0.48 * tex);
   // Attenuate HDR disc intensity & soften limb faster than the corona so the Sun melts
   // smoothly into its golden glow without ever leaving a bare white circle; exact 1:1 at uOpacity == 1.0.
-  float op = max(uOpacity, 0.0);
-  float colorFade = pow(op, 1.4);
-  float alphaFade = pow(op, 2.2);
+  float op = clamp(uOpacity, 0.0, 1.0);
+  float opSafe = max(op, 0.0001);
+  float colorFade = op > 0.0 ? pow(opSafe, 1.4) : 0.0;
+  float alphaFade = op > 0.0 ? pow(opSafe, 2.2) : 0.0;
   float edgeSoft = mix(smoothstep(0.02, 0.58, ndv), 1.0, smoothstep(0.65, 1.0, op));
   gl_FragColor = vec4(color * colorFade, alphaFade * edgeSoft);
 }
@@ -933,7 +974,8 @@ void main() {
   float core = exp(-rScaled * 8.4) * 2.1 * (0.94 + 0.08 * breathe);
   float innerHalo = exp(-rScaled * 3.35) * 0.74 * breathe;
   float midHalo = exp(-rScaled * 1.85) * 0.26 * breathe;
-  float outerHalo = pow(max(1.0 - rScaled, 0.0), 2.75) * 0.2 * breathe;
+  float outerTerm = max(1.0 - rScaled, 0.0);
+  float outerHalo = (outerTerm > 0.0 ? pow(outerTerm, 2.75) : 0.0) * 0.2 * breathe;
 
   // Delicate optical horizontal flare streak
   float streak = exp(-abs(p.y) * 28.0) * exp(-abs(p.x) * 2.15) * 0.24 * breathe;
@@ -950,7 +992,8 @@ void main() {
 
   // Keep core and golden outer halo fading in lockstep with a gentle perceptual curve
   float baseAlpha = clamp(core + innerHalo + midHalo + outerHalo + streak, 0.0, 1.0);
-  float fade = pow(max(uOpacity, 0.0), 1.5);
+  float op = clamp(uOpacity, 0.0, 1.0);
+  float fade = op > 0.0 ? pow(max(op, 0.0001), 1.5) : 0.0;
   gl_FragColor = vec4(col * fade, baseAlpha);
 }
 `;
@@ -1065,7 +1108,9 @@ uniform float uOpacity;
 varying vec2 vUv;
 
 float hash2(vec2 p) {
-  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
 }
 
 float snoise(vec2 p) {
@@ -1094,18 +1139,23 @@ void main() {
   vec3 raw = texture2D(uSkyMap, vUv).rgb;
   // Suppress low-level JPEG compression floor before lifting dark galactic structure
   vec3 cleanRaw = max(raw - vec3(0.008), vec3(0.0));
-  vec3 lifted = pow(cleanRaw, vec3(uGamma));
+  vec3 lifted = pow(max(cleanRaw, vec3(0.00001)), vec3(uGamma)) * step(vec3(0.00001), cleanRaw);
   vec3 baseSky = lifted * uBrightness;
 
   float lat = (vUv.y - 0.5) * 3.14159265;
   float lon = (vUv.x - 0.5) * 6.2831853;
-  float band = exp(-pow(lat / 0.14, 2.0));
-  float wideBand = exp(-pow(lat / 0.28, 2.0));
-  float bulge = exp(-pow(lon / 0.48, 2.0)) * exp(-pow(lat / 0.2, 2.0));
+  float latBand = lat / 0.14;
+  float latWide = lat / 0.28;
+  float lonBulge = lon / 0.48;
+  float latBulge = lat / 0.2;
+  float band = exp(-(latBand * latBand));
+  float wideBand = exp(-(latWide * latWide));
+  float bulge = exp(-(lonBulge * lonBulge)) * exp(-(latBulge * latBulge));
 
   float clouds = fbm(vec2(vUv.x * 16.0, vUv.y * 8.0));
   float fineDust = fbm(vec2(vUv.x * 38.0 + 4.1, vUv.y * 22.0 - 1.7));
-  float greatRift = smoothstep(0.36, 0.72, fineDust) * exp(-pow((lat - (clouds - 0.5) * 0.08) / 0.055, 2.0));
+  float riftArg = (lat - (clouds - 0.5) * 0.08) / 0.055;
+  float greatRift = smoothstep(0.36, 0.72, fineDust) * exp(-(riftArg * riftArg));
 
   vec3 armColor = mix(vec3(0.16, 0.26, 0.46), vec3(0.52, 0.44, 0.38), clouds);
   vec3 coreColor = vec3(0.95, 0.74, 0.52);

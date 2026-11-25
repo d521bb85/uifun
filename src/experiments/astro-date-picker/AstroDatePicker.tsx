@@ -4,6 +4,7 @@ import { createDateInputController, DateInput, DateInputSegment } from "@ui-sdk/
 import { Field, FieldLabel } from "@ui-sdk/react/field";
 import {
   type ComponentProps,
+  type DragEvent,
   type FocusEvent,
   type MouseEvent,
   type PointerEvent,
@@ -16,37 +17,18 @@ import {
 import { useStageActive } from "@/components/stage/StageContext";
 import styles from "./AstroDatePicker.module.css";
 import { type AstroFocusMode, AstroSceneRenderer } from "./AstroScene";
-import { addDateSegment, computeAstroState, getTodayIsoDate, parseIsoDate } from "./astronomy";
+import { computeAstroState, getTodayIsoDate, parseIsoDate } from "./astronomy";
+import {
+  classifyDragIntent,
+  computeDragStepTransition,
+  DEFAULT_CARD_WIDTH_PX,
+  type EditableDateUnit,
+  getStepPxForUnit,
+  isEditableUnit,
+} from "./dragMath";
 
-type EditableDateUnit = "year" | "month" | "day";
-
-const DRAG_THRESHOLD_PX = 5;
-const MONTHS_PER_CARD_WIDTH = 24;
-const DAYS_PER_CARD_WIDTH = 30;
-const MONTH_SNAP_THRESHOLD = 1;
-const DAY_SNAP_THRESHOLD = 1;
-const STEP_PX_BY_UNIT: Record<EditableDateUnit, number> = {
-  year: 11,
-  month: 460 / MONTHS_PER_CARD_WIDTH,
-  day: 460 / DAYS_PER_CARD_WIDTH,
-};
-
-function computeSnappedSteps(rawSteps: number, currentSteps: number, threshold: number): number {
-  let next = currentSteps;
-  while (rawSteps - next >= threshold) {
-    next += 1;
-  }
-  while (next - rawSteps >= threshold) {
-    next -= 1;
-  }
-  return next;
-}
-
-function isEditableUnit(type: string | null | undefined): type is EditableDateUnit {
-  return type === "year" || type === "month" || type === "day";
-}
-
-type DateInputOnValueChange = NonNullable<ComponentProps<typeof DateInput>["onValueChange"]>;
+type DateInputProps = ComponentProps<typeof DateInput>;
+type DateInputOnValueChange = NonNullable<DateInputProps["onValueChange"]>;
 
 export interface AstroDatePickerProps {
   label?: string;
@@ -55,11 +37,30 @@ export interface AstroDatePickerProps {
   onValueChange?: DateInputOnValueChange;
   min?: string;
   max?: string;
+  unavailable?: DateInputProps["unavailable"];
   locale?: string;
   name?: string;
+  form?: string;
   disabled?: boolean;
   readOnly?: boolean;
   required?: boolean;
+  className?: string;
+}
+
+interface ActiveDragState {
+  pointerId: number;
+  pointerType: string;
+  startX: number;
+  startY: number;
+  originX: number;
+  stepPx: number;
+  initialFraction: number;
+  appliedSteps: number;
+  baseIso: string;
+  anchorDay: number | null;
+  currentIso: string;
+  unit: EditableDateUnit;
+  active: boolean;
 }
 
 export function AstroDatePicker({
@@ -69,11 +70,14 @@ export function AstroDatePicker({
   onValueChange,
   min = "0001-01-01",
   max = "9999-12-31",
+  unavailable,
   locale,
   name,
+  form,
   disabled = false,
   readOnly = false,
   required = false,
+  className,
 }: AstroDatePickerProps) {
   const stageActive = useStageActive();
   const [controller] = useState(createDateInputController);
@@ -86,6 +90,8 @@ export function AstroDatePicker({
     return getTodayIsoDate();
   });
 
+  const activeIso = isControlled && value && parseIsoDate(value) ? value : lastValidIso;
+
   const [focusMode, setFocusMode] = useState<AstroFocusMode>("idle");
   const [sceneInteractive, setSceneInteractive] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -96,21 +102,12 @@ export function AstroDatePicker({
 
   const focusModeRef = useRef<AstroFocusMode>("idle");
   const lastInputSourceRef = useRef<"keyboard" | "pointer">("pointer");
-  const lastValidIsoRef = useRef(lastValidIso);
+  const activeIsoRef = useRef(activeIso);
+  const stageActiveRef = useRef(stageActive);
   const monthFractionRef = useRef(0);
   const dayFractionRef = useRef(0);
-
-  const dragRef = useRef<{
-    pointerId: number;
-    startX: number;
-    originX: number;
-    stepPx: number;
-    initialFraction: number;
-    appliedSteps: number;
-    baseIso: string;
-    unit: EditableDateUnit;
-    active: boolean;
-  } | null>(null);
+  const dragRef = useRef<ActiveDragState | null>(null);
+  const suppressNextBlurRef = useRef(false);
 
   useEffect(() => {
     if (isControlled && value && parseIsoDate(value)) {
@@ -123,54 +120,108 @@ export function AstroDatePicker({
   }, [focusMode]);
 
   useEffect(() => {
-    lastValidIsoRef.current = lastValidIso;
-  }, [lastValidIso]);
+    activeIsoRef.current = activeIso;
+  }, [activeIso]);
 
-  const astroState = useMemo(() => computeAstroState(lastValidIso), [lastValidIso]);
-  const initialAstroStateRef = useRef(astroState);
-  const initialStageActiveRef = useRef(stageActive);
+  useEffect(() => {
+    stageActiveRef.current = stageActive;
+  }, [stageActive]);
+
+  const astroState = useMemo(() => computeAstroState(activeIso), [activeIso]);
+  const astroStateRef = useRef(astroState);
+  astroStateRef.current = astroState;
 
   useEffect(() => {
     const canvas = canvasRef.current;
     const card = cardRef.current;
     if (!canvas || !card) return;
 
-    const scene = AstroSceneRenderer.create(canvas, initialAstroStateRef.current);
-    if (!scene) return;
-    rendererRef.current = scene;
-    scene.setOnSceneInteractiveChange(setSceneInteractive);
-
     const motionQuery =
       typeof window !== "undefined" && typeof window.matchMedia === "function"
         ? window.matchMedia("(prefers-reduced-motion: reduce)")
         : null;
-    scene.setReducedMotion(motionQuery?.matches ?? false);
+
+    let currentScene: AstroSceneRenderer | null = null;
+    let unmounted = false;
+
+    const syncCardSize = () => {
+      if (!currentScene) return;
+      const rect = card.getBoundingClientRect();
+      currentScene.resize(rect.width || DEFAULT_CARD_WIDTH_PX, rect.height || 290);
+    };
+
+    const mountScene = () => {
+      if (unmounted) return;
+      currentScene?.dispose();
+      currentScene = AstroSceneRenderer.create(canvas, astroStateRef.current);
+      rendererRef.current = currentScene;
+
+      if (!currentScene) {
+        // WebGL unavailable (e.g. restricted or headless environment): still allow drag scrubbing
+        setSceneInteractive(true);
+        return;
+      }
+
+      currentScene.setOnSceneInteractiveChange(setSceneInteractive);
+      currentScene.setOnContextRestored(mountScene);
+      currentScene.setReducedMotion(motionQuery?.matches ?? false);
+      currentScene.setPageVisible(typeof document === "undefined" ? true : !document.hidden);
+      syncCardSize();
+      if (focusModeRef.current !== "idle") {
+        currentScene.setMode(focusModeRef.current);
+      }
+      currentScene.setActive(stageActiveRef.current);
+      currentScene.start();
+    };
+
+    mountScene();
 
     const handleMotionChange = (event: MediaQueryListEvent) => {
-      scene.setReducedMotion(event.matches);
+      currentScene?.setReducedMotion(event.matches);
     };
     motionQuery?.addEventListener("change", handleMotionChange);
 
-    const rect = card.getBoundingClientRect();
-    scene.resize(rect.width || 460, rect.height || 290);
-    scene.setActive(initialStageActiveRef.current);
-    scene.start();
+    const handleVisibilityChange = () => {
+      currentScene?.setPageVisible(typeof document === "undefined" ? true : !document.hidden);
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    // Watch devicePixelRatio changes (moving between displays or browser zoom)
+    let dprMediaQuery: MediaQueryList | null = null;
+    const handleDprChange = () => {
+      syncCardSize();
+      watchDpr();
+    };
+    const watchDpr = () => {
+      dprMediaQuery?.removeEventListener("change", handleDprChange);
+      if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+        dprMediaQuery = null;
+        return;
+      }
+      dprMediaQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+      dprMediaQuery.addEventListener("change", handleDprChange);
+    };
+    watchDpr();
 
     const resizeObserver =
       typeof ResizeObserver !== "undefined"
         ? new ResizeObserver((entries) => {
             const entry = entries[0];
             if (entry) {
-              scene.resize(entry.contentRect.width, entry.contentRect.height);
+              currentScene?.resize(entry.contentRect.width, entry.contentRect.height);
             }
           })
         : null;
     resizeObserver?.observe(card);
 
     return () => {
+      unmounted = true;
       motionQuery?.removeEventListener("change", handleMotionChange);
+      dprMediaQuery?.removeEventListener("change", handleDprChange);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       resizeObserver?.disconnect();
-      scene.dispose();
+      currentScene?.dispose();
+      currentScene = null;
       rendererRef.current = null;
     };
   }, []);
@@ -195,47 +246,6 @@ export function AstroDatePicker({
     rendererRef.current?.setActive(stageActive);
   }, [stageActive]);
 
-  const handleValueChange: DateInputOnValueChange = (next, details) => {
-    if (next && parseIsoDate(next)) {
-      if (!dragRef.current?.active) {
-        if (monthFractionRef.current !== 0) {
-          monthFractionRef.current = 0;
-          rendererRef.current?.setMonthDragState(false, 0);
-        }
-        if (dayFractionRef.current !== 0) {
-          dayFractionRef.current = 0;
-          rendererRef.current?.setDayDragState(false, 0);
-        }
-      }
-      setLastValidIso(next);
-    }
-    onValueChange?.(next, details);
-  };
-
-  const getFirstEditableUnit = (): EditableDateUnit => {
-    const first = cardRef.current?.querySelector<HTMLElement>(
-      '[data-slot="date-input-segment"]:not([data-type="literal"])',
-    )?.dataset.type;
-    return isEditableUnit(first) ? first : "month";
-  };
-
-  const handleFocusCapture = (event: FocusEvent<HTMLDivElement>) => {
-    const target = event.target as HTMLElement | null;
-    const segmentEl = target?.closest<HTMLElement>('[data-slot="date-input-segment"]');
-    const unit = segmentEl?.dataset.type;
-    if (isEditableUnit(unit)) {
-      setFocusMode(unit);
-    }
-  };
-
-  const handleBlur = (event: FocusEvent<HTMLDivElement>) => {
-    const nextFocused = event.relatedTarget as Node | null;
-    if (nextFocused && cardRef.current?.contains(nextFocused)) {
-      return;
-    }
-    setFocusMode("idle");
-  };
-
   const endActiveDrag = useCallback(() => {
     const drag = dragRef.current;
     if (!drag) return;
@@ -251,10 +261,10 @@ export function AstroDatePicker({
     }
     if (drag.unit === "month") {
       // Leave Earth right where the user released; normalize only when leaving month mode (e.g. back to Hero)
-      rendererRef.current?.setMonthDragState(false, monthFractionRef.current);
+      rendererRef.current?.setMonthDragState(false, monthFractionRef.current, null);
     } else {
       monthFractionRef.current = 0;
-      rendererRef.current?.setMonthDragState(false, 0);
+      rendererRef.current?.setMonthDragState(false, 0, null);
     }
     if (drag.unit === "day") {
       dayFractionRef.current = 0;
@@ -262,6 +272,82 @@ export function AstroDatePicker({
     }
     dragRef.current = null;
   }, []);
+
+  useEffect(() => {
+    if (disabled) {
+      endActiveDrag();
+      setFocusMode("idle");
+    }
+  }, [disabled, endActiveDrag]);
+
+  useEffect(() => {
+    if (readOnly) {
+      endActiveDrag();
+    }
+  }, [readOnly, endActiveDrag]);
+
+  const handleValueChange: DateInputOnValueChange = (next, details) => {
+    onValueChange?.(next, details);
+    if (details.canceled) return;
+    if (next && parseIsoDate(next)) {
+      if (!dragRef.current?.active) {
+        if (monthFractionRef.current !== 0) {
+          monthFractionRef.current = 0;
+          rendererRef.current?.setMonthDragState(false, 0, null);
+        }
+        if (dayFractionRef.current !== 0) {
+          dayFractionRef.current = 0;
+          rendererRef.current?.setDayDragState(false, 0);
+        }
+      }
+      if (!isControlled) {
+        setLastValidIso(next);
+      }
+    }
+  };
+
+  const getFirstEditableUnit = (): EditableDateUnit => {
+    const first = cardRef.current?.querySelector<HTMLElement>(
+      '[data-slot="date-input-segment"]:not([data-type="literal"])',
+    )?.dataset.type;
+    return isEditableUnit(first) ? first : "month";
+  };
+
+  const isFieldDisabled = () => disabled || Boolean(cardRef.current?.hasAttribute("data-disabled"));
+
+  const focusUnitWithoutScroll = (unit: EditableDateUnit) => {
+    const segmentEl = cardRef.current?.querySelector<HTMLElement>(
+      `[data-slot="date-input-segment"][data-type="${unit}"]`,
+    );
+    if (segmentEl) {
+      segmentEl.focus({ preventScroll: true });
+    } else {
+      controller.focus(unit);
+    }
+  };
+
+  const handleFocusCapture = (event: FocusEvent<HTMLDivElement>) => {
+    suppressNextBlurRef.current = false;
+    const target = event.target as HTMLElement | null;
+    const segmentEl = target?.closest<HTMLElement>('[data-slot="date-input-segment"]');
+    const unit = segmentEl?.dataset.type;
+    if (isEditableUnit(unit)) {
+      setFocusMode(unit);
+    }
+  };
+
+  const handleBlur = (event: FocusEvent<HTMLDivElement>) => {
+    if (suppressNextBlurRef.current) {
+      suppressNextBlurRef.current = false;
+      return;
+    }
+    const nextFocused = event.relatedTarget as Node | null;
+    if (nextFocused && cardRef.current?.contains(nextFocused)) {
+      return;
+    }
+    endActiveDrag();
+    setFocusMode("idle");
+  };
 
   const markKeyboardInput = () => {
     lastInputSourceRef.current = "keyboard";
@@ -272,23 +358,39 @@ export function AstroDatePicker({
   }, []);
 
   useEffect(() => {
+    const handleGlobalPointerDown = (event: globalThis.PointerEvent) => {
+      markPointerInput();
+      if (
+        focusModeRef.current !== "idle" &&
+        !cardRef.current?.contains(event.target as Node | null)
+      ) {
+        endActiveDrag();
+        setFocusMode("idle");
+      }
+    };
+    const handleGlobalPointerEnd = (event: globalThis.PointerEvent) => {
+      const drag = dragRef.current;
+      if (drag && drag.pointerId === event.pointerId) {
+        endActiveDrag();
+      }
+    };
     const handleGlobalRelease = () => {
       if (dragRef.current) {
         endActiveDrag();
       }
     };
 
-    window.addEventListener("pointerdown", markPointerInput, true);
-    window.addEventListener("pointerup", handleGlobalRelease, true);
-    window.addEventListener("pointercancel", handleGlobalRelease, true);
+    window.addEventListener("pointerdown", handleGlobalPointerDown, true);
+    window.addEventListener("pointerup", handleGlobalPointerEnd, true);
+    window.addEventListener("pointercancel", handleGlobalPointerEnd, true);
     window.addEventListener("mouseup", handleGlobalRelease, true);
     window.addEventListener("blur", handleGlobalRelease);
     document.addEventListener("visibilitychange", handleGlobalRelease);
 
     return () => {
-      window.removeEventListener("pointerdown", markPointerInput, true);
-      window.removeEventListener("pointerup", handleGlobalRelease, true);
-      window.removeEventListener("pointercancel", handleGlobalRelease, true);
+      window.removeEventListener("pointerdown", handleGlobalPointerDown, true);
+      window.removeEventListener("pointerup", handleGlobalPointerEnd, true);
+      window.removeEventListener("pointercancel", handleGlobalPointerEnd, true);
       window.removeEventListener("mouseup", handleGlobalRelease, true);
       window.removeEventListener("blur", handleGlobalRelease);
       document.removeEventListener("visibilitychange", handleGlobalRelease);
@@ -301,8 +403,12 @@ export function AstroDatePicker({
     }
   }, [sceneInteractive, endActiveDrag]);
 
+  const isFocusedInside = () =>
+    Boolean(document.activeElement && cardRef.current?.contains(document.activeElement));
+
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
-    if (disabled || event.button !== 0) return;
+    if (isFieldDisabled() || event.button !== 0 || !event.isPrimary) return;
+    if (dragRef.current?.active) return;
     lastInputSourceRef.current = "pointer";
 
     const target = event.target as HTMLElement | null;
@@ -331,26 +437,31 @@ export function AstroDatePicker({
       : focusModeRef.current === activeUnit;
 
     if (!isDateInput) {
-      // Keep pointerdown on the card background from blurring the active segment.
-      event.preventDefault();
+      // On desktop/pen, keep focus on the active segment for immediate keyboard control without page scroll.
+      // On touch, activate the 3D mode without forcing the mobile virtual keyboard to ambush the screen;
+      // tapping any date segment or the label still opens the numeric keypad natively.
+      if (event.pointerType !== "touch") {
+        event.preventDefault();
+        focusUnitWithoutScroll(activeUnit);
+      } else if (isFocusedInside()) {
+        suppressNextBlurRef.current = true;
+        (document.activeElement as HTMLElement | null)?.blur();
+      }
       setFocusMode(activeUnit);
-      controller.focus(activeUnit);
     }
     renderer?.setMode(activeUnit);
 
     if (readOnly || !canDrag) return;
 
-    const cardWidth = cardRef.current?.getBoundingClientRect().width || 460;
-    const stepPx =
-      activeUnit === "month"
-        ? cardWidth / MONTHS_PER_CARD_WIDTH
-        : activeUnit === "day"
-          ? cardWidth / DAYS_PER_CARD_WIDTH
-          : STEP_PX_BY_UNIT[activeUnit];
+    const cardWidth = cardRef.current?.getBoundingClientRect().width || DEFAULT_CARD_WIDTH_PX;
+    const stepPx = getStepPxForUnit(activeUnit, cardWidth);
+    const baseIso = controller.getValue() ?? activeIsoRef.current;
 
     dragRef.current = {
       pointerId: event.pointerId,
+      pointerType: event.pointerType,
       startX: event.clientX,
+      startY: event.clientY,
       originX: event.clientX,
       stepPx,
       initialFraction:
@@ -360,7 +471,9 @@ export function AstroDatePicker({
             ? dayFractionRef.current
             : 0,
       appliedSteps: 0,
-      baseIso: controller.getValue() ?? lastValidIsoRef.current,
+      baseIso,
+      anchorDay: parseIsoDate(baseIso)?.day ?? null,
+      currentIso: baseIso,
       unit: activeUnit,
       active: false,
     };
@@ -382,7 +495,16 @@ export function AstroDatePicker({
     }
 
     if (!drag.active) {
-      if (Math.abs(event.clientX - drag.startX) < DRAG_THRESHOLD_PX) return;
+      const intent = classifyDragIntent(
+        event.clientX - drag.startX,
+        event.clientY - drag.startY,
+        drag.pointerType,
+      );
+      if (intent === "pending") return;
+      if (intent === "cancel") {
+        dragRef.current = null;
+        return;
+      }
       drag.active = true;
       // Anchor drag origin here so the first active frame starts smoothly at 0px without a threshold jump
       drag.originX = event.clientX;
@@ -392,62 +514,69 @@ export function AstroDatePicker({
       } catch {
         // Ignore if capture is disallowed in the current browsing context.
       }
-      if (focusModeRef.current !== drag.unit) {
+      if (drag.pointerType === "touch") {
+        // Dismiss mobile virtual keyboard & prevent iOS selection callouts while scrubbing the 3D scene
+        if (isFocusedInside()) {
+          suppressNextBlurRef.current = true;
+          (document.activeElement as HTMLElement | null)?.blur();
+        }
+        if (focusModeRef.current !== drag.unit) {
+          setFocusMode(drag.unit);
+        }
+      } else if (focusModeRef.current !== drag.unit) {
         setFocusMode(drag.unit);
-        controller.focus(drag.unit);
+        focusUnitWithoutScroll(drag.unit);
+      }
+      if (drag.unit === "month") {
+        rendererRef.current?.setMonthDragState(true, monthFractionRef.current, drag.anchorDay);
       }
     }
 
     const dx = event.clientX - drag.originX;
     const rawSteps = drag.initialFraction + dx / drag.stepPx;
-    const nextSteps =
-      drag.unit === "month"
-        ? computeSnappedSteps(rawSteps, drag.appliedSteps, MONTH_SNAP_THRESHOLD)
-        : drag.unit === "day"
-          ? computeSnappedSteps(rawSteps, drag.appliedSteps, DAY_SNAP_THRESHOLD)
-          : Math.trunc(rawSteps);
+    const transition = computeDragStepTransition({
+      baseIso: drag.baseIso,
+      currentIso: drag.currentIso,
+      unit: drag.unit,
+      appliedSteps: drag.appliedSteps,
+      rawSteps,
+      min,
+      max,
+    });
 
-    if (nextSteps !== drag.appliedSteps) {
-      if (drag.unit === "month" || drag.unit === "day") {
-        // Step through adjacent months/days sequentially so WebGL neighbor deltas stay 100% continuous
-        const stepDir = Math.sign(nextSteps - drag.appliedSteps);
-        while (drag.appliedSteps !== nextSteps) {
-          drag.appliedSteps += stepDir;
-          const stepIso = addDateSegment(drag.baseIso, drag.unit, drag.appliedSteps, min, max);
-          if (parseIsoDate(stepIso)) {
+    if (transition.nextSteps !== drag.appliedSteps && transition.nextIso !== drag.currentIso) {
+      const accepted = controller.setValue(transition.nextIso, { event: event.nativeEvent });
+      if (accepted) {
+        drag.appliedSteps = transition.nextSteps;
+        drag.currentIso = transition.nextIso;
+
+        if (!isControlled) {
+          // Step through adjacent months/days sequentially so WebGL neighbor deltas stay 100% continuous
+          for (const stepIso of transition.stepIsos) {
             rendererRef.current?.setState(computeAstroState(stepIso));
           }
+          setLastValidIso(transition.nextIso);
         }
-      } else {
-        drag.appliedSteps = nextSteps;
       }
+    }
 
-      const nextIso = addDateSegment(drag.baseIso, drag.unit, nextSteps, min, max);
-      controller.setValue(nextIso);
-      if (parseIsoDate(nextIso)) {
-        if (drag.unit !== "month" && drag.unit !== "day") {
-          rendererRef.current?.setState(computeAstroState(nextIso));
-        }
-        setLastValidIso(nextIso);
-      }
+    if (transition.clampedAtBoundary) {
+      // Re-anchor origin at the min/max boundary so reversing drag direction responds immediately
+      drag.originX = event.clientX;
+      drag.initialFraction = drag.appliedSteps;
     }
 
     if (drag.unit === "month") {
-      const nextFraction = rawSteps - nextSteps;
-      monthFractionRef.current = nextFraction;
-      rendererRef.current?.setMonthDragState(true, nextFraction);
+      monthFractionRef.current = transition.fraction;
+      rendererRef.current?.setMonthDragState(true, transition.fraction, drag.anchorDay);
     } else if (drag.unit === "day") {
-      const nextFraction = rawSteps - nextSteps;
-      dayFractionRef.current = nextFraction;
-      rendererRef.current?.setDayDragState(true, nextFraction);
+      dayFractionRef.current = transition.fraction;
+      rendererRef.current?.setDayDragState(true, transition.fraction);
     }
   };
 
-  const isFocusedInside = () =>
-    Boolean(document.activeElement && cardRef.current?.contains(document.activeElement));
-
   const handleLabelMouseDown = (event: MouseEvent<HTMLLabelElement>) => {
-    if (disabled || event.button !== 0) return;
+    if (isFieldDisabled() || event.button !== 0) return;
     if (isFocusedInside()) {
       // Prevent mousedown on the non-focusable label from blurring the active segment.
       event.preventDefault();
@@ -455,10 +584,14 @@ export function AstroDatePicker({
   };
 
   const handleLabelClick = (event: MouseEvent<HTMLLabelElement>) => {
-    if (disabled) return;
+    if (isFieldDisabled()) return;
     if (isFocusedInside()) {
       event.preventDefault();
     }
+  };
+
+  const handleDragStart = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
   };
 
   const finishDrag = (event: PointerEvent<HTMLDivElement>) => {
@@ -467,16 +600,20 @@ export function AstroDatePicker({
     endActiveDrag();
   };
 
+  const cardClassName = className ? `${styles.card} ${className}` : styles.card;
+
   return (
     <Field
       ref={cardRef}
-      className={styles.card}
+      className={cardClassName}
       disabled={disabled}
       data-focus-mode={focusMode}
       data-scene-ready={sceneInteractive && focusMode !== "idle" && !readOnly ? "" : undefined}
       data-dragging={dragging ? "" : undefined}
+      onDragStart={handleDragStart}
       onKeyDownCapture={markKeyboardInput}
       onBeforeInputCapture={markKeyboardInput}
+      onInputCapture={markKeyboardInput}
       onPointerDownCapture={markPointerInput}
       onFocusCapture={handleFocusCapture}
       onBlur={handleBlur}
@@ -503,8 +640,10 @@ export function AstroDatePicker({
         onValueChange={handleValueChange}
         min={min}
         max={max}
+        unavailable={unavailable}
         locale={locale}
         name={name}
+        form={form}
         disabled={disabled}
         readOnly={readOnly}
         required={required}

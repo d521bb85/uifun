@@ -70,25 +70,44 @@ export interface AstroState {
   galactic: GalacticState;
 }
 
+const TWO_PI = Math.PI * 2;
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31] as const;
+
 function mod360(deg: number): number {
   const m = deg % 360;
   return m < 0 ? m + 360 : m;
+}
+
+function modTwoPi(rad: number): number {
+  const m = rad % TWO_PI;
+  return m < 0 ? m + TWO_PI : m;
 }
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+export function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
 export function daysInMonth(year: number, month: number): number {
-  const date = new Date(0);
-  date.setUTCFullYear(year, month, 0);
-  return date.getUTCDate();
+  if (!Number.isFinite(year) || !Number.isFinite(month)) return 30;
+  const y = Math.trunc(year);
+  const m = clamp(Math.trunc(month), 1, 12);
+  if (m === 2) return isLeapYear(y) ? 29 : 28;
+  return DAYS_IN_MONTH[m - 1] ?? 30;
 }
 
 export function formatIsoDate(year: number, month: number, day: number): string {
-  const y = String(clamp(Math.trunc(year), 1, 9999)).padStart(4, "0");
-  const m = String(clamp(Math.trunc(month), 1, 12)).padStart(2, "0");
-  const d = String(clamp(Math.trunc(day), 1, daysInMonth(Number(y), Number(m)))).padStart(2, "0");
+  const safeYear = Number.isFinite(year) ? clamp(Math.trunc(year), 1, 9999) : 1;
+  const safeMonth = Number.isFinite(month) ? clamp(Math.trunc(month), 1, 12) : 1;
+  const safeDay = Number.isFinite(day)
+    ? clamp(Math.trunc(day), 1, daysInMonth(safeYear, safeMonth))
+    : 1;
+  const y = String(safeYear).padStart(4, "0");
+  const m = String(safeMonth).padStart(2, "0");
+  const d = String(safeDay).padStart(2, "0");
   return `${y}-${m}-${d}`;
 }
 
@@ -109,6 +128,18 @@ export function getTodayIsoDate(): string {
   return formatIsoDate(now.getFullYear(), now.getMonth() + 1, now.getDate());
 }
 
+export function clampIsoDate(iso: string, minIso?: string, maxIso?: string): string {
+  if (!parseIsoDate(iso)) return iso;
+  const validMin = minIso && parseIsoDate(minIso) ? minIso : null;
+  const validMax = maxIso && parseIsoDate(maxIso) ? maxIso : null;
+  if (validMin && validMax && validMin > validMax) {
+    return iso;
+  }
+  if (validMin && iso < validMin) return validMin;
+  if (validMax && iso > validMax) return validMax;
+  return iso;
+}
+
 export function addDateSegment(
   iso: string,
   unit: "year" | "month" | "day",
@@ -117,26 +148,25 @@ export function addDateSegment(
   maxIso = "9999-12-31",
 ): string {
   const parsed = parseIsoDate(iso);
-  if (!parsed || delta === 0) return iso;
+  const steps = Number.isFinite(delta) ? Math.trunc(delta) : 0;
+  if (!parsed || steps === 0) return iso;
 
   let nextIso: string;
   if (unit === "year") {
-    const nextYear = clamp(parsed.year + delta, 1, 9999);
+    const nextYear = clamp(parsed.year + steps, 1, 9999);
     const maxDay = daysInMonth(nextYear, parsed.month);
     nextIso = formatIsoDate(nextYear, parsed.month, Math.min(parsed.day, maxDay));
   } else if (unit === "month") {
-    const nextMonth = ((((parsed.month - 1 + delta) % 12) + 12) % 12) + 1;
+    const nextMonth = ((((parsed.month - 1 + steps) % 12) + 12) % 12) + 1;
     const maxDay = daysInMonth(parsed.year, nextMonth);
     nextIso = formatIsoDate(parsed.year, nextMonth, Math.min(parsed.day, maxDay));
   } else {
     const maxDay = daysInMonth(parsed.year, parsed.month);
-    const nextDay = ((((parsed.day - 1 + delta) % maxDay) + maxDay) % maxDay) + 1;
+    const nextDay = ((((parsed.day - 1 + steps) % maxDay) + maxDay) % maxDay) + 1;
     nextIso = formatIsoDate(parsed.year, parsed.month, nextDay);
   }
 
-  if (nextIso < minIso) return minIso;
-  if (nextIso > maxIso) return maxIso;
-  return nextIso;
+  return clampIsoDate(nextIso, minIso, maxIso);
 }
 
 export function toJulianDay(year: number, month: number, day: number, utcHours = 12): number {
@@ -185,7 +215,9 @@ export function computeSolarState(jd: number): SolarState {
     23.43929111 - (46.815 * t + 0.00059 * t2 - 0.001813 * t3) / 3600 + 0.00256 * Math.cos(omegaRad);
   const obliquityRad = obliquityDeg * DEG2RAD;
 
-  const sunDeclinationRad = Math.asin(Math.sin(obliquityRad) * Math.sin(sunAppLonRad));
+  const sunDeclinationRad = Math.asin(
+    clamp(Math.sin(obliquityRad) * Math.sin(sunAppLonRad), -1, 1),
+  );
   const sunRightAscensionRad = Math.atan2(
     Math.cos(obliquityRad) * Math.sin(sunAppLonRad),
     Math.cos(sunAppLonRad),
@@ -197,7 +229,7 @@ export function computeSolarState(jd: number): SolarState {
   const gmstRad = gmstDeg * DEG2RAD;
 
   const earthHeliocentricLongitudeRad = mod360(sunTrueLonDeg + 180) * DEG2RAD;
-  const subsolarLonRad = ((sunRightAscensionRad - gmstRad + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+  const subsolarLonRad = modTwoPi(sunRightAscensionRad - gmstRad + Math.PI) - Math.PI;
 
   return {
     julianDay: jd,
