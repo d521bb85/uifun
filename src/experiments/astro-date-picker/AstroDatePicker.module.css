@@ -33,12 +33,12 @@
   opacity: 0.65;
 }
 
-.card:not([data-focus-mode="idle"]):not([data-disabled]) {
+.card[data-scene-ready]:not([data-disabled]) {
   cursor: grab;
 }
 
-.card:not([data-focus-mode="idle"]):not([data-disabled]):active,
-.card:not([data-focus-mode="idle"]):not([data-disabled])[data-dragging] {
+.card[data-scene-ready]:not([data-disabled]):active,
+.card[data-scene-ready]:not([data-disabled])[data-dragging] {
   cursor: grabbing;
 }
 

@@ -41,6 +41,50 @@ import { BRIGHT_STARS, bvToRgb } from "./starCatalog";
 
 export type AstroFocusMode = "idle" | "year" | "month" | "day";
 
+export interface SetModeOptions {
+  deferUntilValueSettled?: boolean;
+}
+
+export interface SceneValueAnimationState {
+  mode: AstroFocusMode;
+  flightActive: boolean;
+  orbitError: number;
+  dayElongError: number;
+  dayAgeError: number;
+  epochYearsError: number;
+  sunYearPosError: number;
+}
+
+const SCENE_INTERACTIVE_FLIGHT_PROGRESS = 0.5;
+
+export function isSceneModeInteractive(
+  currentMode: AstroFocusMode,
+  targetMode: AstroFocusMode,
+  pendingMode: AstroFocusMode | null,
+  flightActive: boolean,
+  flightProgress = 1,
+): boolean {
+  if (currentMode !== targetMode || pendingMode !== null) return false;
+  if (!flightActive) return true;
+  return flightProgress >= SCENE_INTERACTIVE_FLIGHT_PROGRESS;
+}
+
+export function isSceneValueAnimating(state: SceneValueAnimationState): boolean {
+  if (state.mode === "month") {
+    return state.orbitError > 0.02;
+  }
+  if (state.mode === "day") {
+    return state.dayElongError > 0.02 || state.dayAgeError > 0.06;
+  }
+  if (state.mode === "year") {
+    if (state.epochYearsError > 0.05) return true;
+    if (!state.flightActive) {
+      return state.sunYearPosError > 0.025;
+    }
+  }
+  return false;
+}
+
 const TEXTURE_BASE = "/textures/astro";
 const EARTH_ORBIT_RADIUS = 6.2;
 const MEAN_LUNAR_DISTANCE_KM = 384400;
@@ -74,7 +118,6 @@ interface EarthCameraRig {
   height: number;
   targetWeight: number;
   targetY: number;
-  focusFollow: number;
 }
 
 // Hero (idle) framing: Earth fills the left corner (~1/3 of the card) with static Sun upper-right
@@ -85,18 +128,16 @@ const HERO_RIG: EarthCameraRig = {
   height: 0.8,
   targetWeight: 0.67,
   targetY: 0.02,
-  focusFollow: 0.35,
 };
 
 // Orbital Carousel (month) framing: three-quarter sunlit angle on Earth (~30% lit disc) with
-// static Sun anchored upper-right and gentle, damped horizontal drift during drag.
+// static Sun anchored upper-right while Earth stays locked in frame as the orbit advances.
 const CAROUSEL_RIG: EarthCameraRig = {
   radial: 2.5,
   tangent: 4.9,
   height: 3.1,
   targetWeight: 0.65,
   targetY: -0.22,
-  focusFollow: 0.0,
 };
 
 type FlightSpace = "cylindrical" | "cartesian";
@@ -111,7 +152,6 @@ interface ModeVisualTargets {
   wMonthGuide: number;
   wYearGuide: number;
   wDayGuide: number;
-  wMonthRig: number;
   starHorizonClip: number;
   skyBright: number;
   skyGamma: number;
@@ -155,7 +195,6 @@ interface CameraFlight {
   startWMonthGuide: number;
   startWYearGuide: number;
   startWDayGuide: number;
-  startWMonthRig: number;
   startStarHorizonClip: number;
 }
 
@@ -170,7 +209,6 @@ function getModeVisualTargets(mode: AstroFocusMode): ModeVisualTargets {
     wMonthGuide: mode === "month" ? 1 : 0,
     wYearGuide: mode === "year" ? 1 : 0,
     wDayGuide: mode === "day" ? 1 : 0,
-    wMonthRig: mode === "month" ? 1 : 0,
     starHorizonClip: mode === "day" ? 1 : 0,
     skyBright: mode === "year" ? 1.02 : mode === "month" ? 0.52 : mode === "day" ? 0.24 : 0.48,
     skyGamma: mode === "year" ? 0.74 : mode === "month" ? 0.83 : mode === "day" ? 0.88 : 0.84,
@@ -538,6 +576,9 @@ export class AstroSceneRenderer {
 
   private astroState: AstroState;
   private mode: AstroFocusMode = "idle";
+  private pendingMode: AstroFocusMode | null = null;
+  private sceneInteractive = false;
+  private onSceneInteractiveChange: ((interactive: boolean) => void) | null = null;
   private active = true;
   private reducedMotion = false;
   private disposed = false;
@@ -576,8 +617,6 @@ export class AstroSceneRenderer {
 
   private targetOrbitAngle: number;
   private smoothOrbitAngle: number;
-  private trailOrbitAngle: number;
-  private camOrbitAngle: number;
   private monthDragging = false;
   private dragMonthFraction = 0;
   private nextMonthIso = "";
@@ -657,7 +696,6 @@ export class AstroSceneRenderer {
   private wMonthGuide = 0;
   private wYearGuide = 0;
   private wDayGuide = 0;
-  private wMonthRig = 0;
   private starHorizonClip = 0;
   private smoothSkyBright = 0.48;
   private smoothSkyGamma = 0.84;
@@ -699,7 +737,6 @@ export class AstroSceneRenderer {
     startWMonthGuide: 0,
     startWYearGuide: 0,
     startWDayGuide: 0,
-    startWMonthRig: 0,
     startStarHorizonClip: 0,
   };
 
@@ -707,8 +744,6 @@ export class AstroSceneRenderer {
     this.astroState = initialState;
     this.targetOrbitAngle = initialState.solar.earthHeliocentricLongitudeRad;
     this.smoothOrbitAngle = initialState.solar.earthHeliocentricLongitudeRad;
-    this.trailOrbitAngle = initialState.solar.earthHeliocentricLongitudeRad;
-    this.camOrbitAngle = initialState.solar.earthHeliocentricLongitudeRad;
     this.smoothOrbitRadius = EARTH_ORBIT_RADIUS * initialState.solar.earthSunDistanceAU;
     this.targetSpinAngle = initialState.solar.gmstRad;
     this.smoothSpinAngle = initialState.solar.gmstRad;
@@ -1666,6 +1701,12 @@ export class AstroSceneRenderer {
     this.updateDayNeighbors();
 
     if (!this.active || this.reducedMotion) {
+      if (this.pendingMode !== null) {
+        const nextMode = this.pendingMode;
+        this.pendingMode = null;
+        this.commitMode(nextMode);
+        return;
+      }
       this.snapToTargets();
       this.renderSingleFrame();
     }
@@ -1865,12 +1906,96 @@ export class AstroSceneRenderer {
     f.startWMonthGuide = this.wMonthGuide;
     f.startWYearGuide = this.wYearGuide;
     f.startWDayGuide = this.wDayGuide;
-    f.startWMonthRig = this.wMonthRig;
     f.startStarHorizonClip = this.starHorizonClip;
   }
 
-  setMode(mode: AstroFocusMode) {
-    if (this.mode === mode) return;
+  private isCurrentValueAnimating(): boolean {
+    if (!this.active || this.reducedMotion) return false;
+
+    const monthFraction = this.dragMonthFraction;
+    const orbitOffset =
+      monthFraction >= 0
+        ? monthFraction * this.nextOrbitDelta
+        : -monthFraction * this.prevOrbitDelta;
+    const dayFraction = this.dragDayFraction;
+    const dayElongOffset =
+      dayFraction >= 0
+        ? dayFraction * this.nextDayElongDelta
+        : -dayFraction * this.prevDayElongDelta;
+    const dayAgeOffset =
+      dayFraction >= 0 ? dayFraction * this.nextDayAgeDelta : -dayFraction * this.prevDayAgeDelta;
+
+    return isSceneValueAnimating({
+      mode: this.mode,
+      flightActive: this.flight.active,
+      orbitError: Math.abs(this.targetOrbitAngle + orbitOffset - this.smoothOrbitAngle),
+      dayElongError: Math.abs(this.targetDayElong + dayElongOffset - this.smoothMoonElong),
+      dayAgeError: Math.abs(this.targetDayAge + dayAgeOffset - this.smoothDayAge),
+      epochYearsError: Math.abs(
+        this.astroState.galactic.epochYearsSinceJ2000 - this.smoothEpochYears,
+      ),
+      sunYearPosError: this.sunGroup.position.distanceTo(this.sunYearWorldPos),
+    });
+  }
+
+  private getFlightProgress(): number {
+    if (!this.flight.active) return 1;
+    return THREE.MathUtils.clamp(this.flight.elapsed / Math.max(this.flight.duration, 1e-4), 0, 1);
+  }
+
+  isModeInteractive(mode: AstroFocusMode): boolean {
+    return isSceneModeInteractive(
+      this.mode,
+      mode,
+      this.pendingMode,
+      this.flight.active,
+      this.getFlightProgress(),
+    );
+  }
+
+  setOnSceneInteractiveChange(listener: ((interactive: boolean) => void) | null) {
+    this.onSceneInteractiveChange = listener;
+    listener?.(this.sceneInteractive);
+  }
+
+  private syncSceneInteractive() {
+    const next =
+      this.mode !== "idle" &&
+      isSceneModeInteractive(
+        this.mode,
+        this.mode,
+        this.pendingMode,
+        this.flight.active,
+        this.getFlightProgress(),
+      );
+    if (next !== this.sceneInteractive) {
+      this.sceneInteractive = next;
+      this.onSceneInteractiveChange?.(next);
+    }
+  }
+
+  setMode(mode: AstroFocusMode, options?: SetModeOptions) {
+    if (this.mode === mode) {
+      this.pendingMode = null;
+      this.syncSceneInteractive();
+      return;
+    }
+
+    if (options?.deferUntilValueSettled && this.isCurrentValueAnimating()) {
+      this.pendingMode = mode;
+      this.syncSceneInteractive();
+      return;
+    }
+
+    this.pendingMode = null;
+    this.commitMode(mode);
+  }
+
+  private commitMode(mode: AstroFocusMode) {
+    if (this.mode === mode) {
+      this.syncSceneInteractive();
+      return;
+    }
     const prevMode = this.mode;
     this.mode = mode;
 
@@ -1904,11 +2029,18 @@ export class AstroSceneRenderer {
     }
 
     this.startFlight(prevMode, mode);
+    this.syncSceneInteractive();
   }
 
   setReducedMotion(reduced: boolean) {
     this.reducedMotion = reduced;
     if (reduced) {
+      if (this.pendingMode !== null) {
+        const nextMode = this.pendingMode;
+        this.pendingMode = null;
+        this.commitMode(nextMode);
+        return;
+      }
       this.snapToTargets();
       this.renderSingleFrame();
     }
@@ -1936,6 +2068,7 @@ export class AstroSceneRenderer {
 
   dispose() {
     this.disposed = true;
+    this.onSceneInteractiveChange = null;
     if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
@@ -1948,6 +2081,7 @@ export class AstroSceneRenderer {
 
   private snapToTargets() {
     this.flight.active = false;
+    this.syncSceneInteractive();
     this.monthDragging = false;
     this.dragMonthFraction = 0;
     this.dayDragging = false;
@@ -1955,8 +2089,6 @@ export class AstroSceneRenderer {
 
     this.targetOrbitAngle = this.astroState.solar.earthHeliocentricLongitudeRad;
     this.smoothOrbitAngle = this.targetOrbitAngle;
-    this.trailOrbitAngle = this.targetOrbitAngle;
-    this.camOrbitAngle = this.targetOrbitAngle;
     this.smoothOrbitRadius = EARTH_ORBIT_RADIUS * this.astroState.solar.earthSunDistanceAU;
     this.targetSpinAngle = this.astroState.solar.gmstRad;
     this.smoothSpinAngle = this.targetSpinAngle;
@@ -2003,7 +2135,6 @@ export class AstroSceneRenderer {
     this.wMonthGuide = targets.wMonthGuide;
     this.wYearGuide = targets.wYearGuide;
     this.wDayGuide = targets.wDayGuide;
-    this.wMonthRig = targets.wMonthRig;
     this.starHorizonClip = targets.starHorizonClip;
     this.smoothSkyBright = targets.skyBright;
     this.smoothSkyGamma = targets.skyGamma;
@@ -2118,11 +2249,7 @@ export class AstroSceneRenderer {
     outPos: THREE.Vector3,
     outTarget: THREE.Vector3,
   ) {
-    // Polar co-orbiting camera around the static Sun:
-    // - In idle (Hero): tightly tracks Earth in the left corner with the Sun upper-right.
-    // - In month (Orbital Carousel): trails elastically so Earth swings 1:1 left/right along
-    //   the horizontal front arc while the Sun stays anchored upper-center and the stars revolve.
-    const camAngle = this.camOrbitAngle;
+    const camAngle = this.smoothOrbitAngle;
     const radialOutX = Math.cos(camAngle);
     const radialOutZ = -Math.sin(camAngle);
     const tangentX = -Math.sin(camAngle);
@@ -2141,12 +2268,7 @@ export class AstroSceneRenderer {
       anchorZ + radialOutZ * rig.radial + tangentZ * (rig.tangent + swayTangent),
     );
 
-    const ex = this.earthOrbitRoot.position.x;
-    const ez = this.earthOrbitRoot.position.z;
-    const focusX = THREE.MathUtils.lerp(anchorX, ex, rig.focusFollow);
-    const focusZ = THREE.MathUtils.lerp(anchorZ, ez, rig.focusFollow);
-
-    outTarget.set(focusX * rig.targetWeight, rig.targetY, focusZ * rig.targetWeight);
+    outTarget.set(anchorX * rig.targetWeight, rig.targetY, anchorZ * rig.targetWeight);
   }
 
   private computeYearCamera(outPos: THREE.Vector3, outTarget: THREE.Vector3) {
@@ -2243,7 +2365,6 @@ export class AstroSceneRenderer {
     );
     this.wYearGuide = phaseWeight(f.startWYearGuide, targets.wYearGuide, u, 0.38, 0.9, 0.0, 0.26);
     this.wDayGuide = phaseWeight(f.startWDayGuide, targets.wDayGuide, u, 0.4, 0.9, 0.0, 0.26);
-    this.wMonthRig = THREE.MathUtils.lerp(f.startWMonthRig, targets.wMonthRig, s);
     this.starHorizonClip = phaseWeight(
       f.startStarHorizonClip,
       targets.starHorizonClip,
@@ -2337,6 +2458,7 @@ export class AstroSceneRenderer {
     if (u >= 1) {
       f.active = false;
     }
+    this.syncSceneInteractive();
   }
 
   private applyUniforms() {
@@ -2469,20 +2591,6 @@ export class AstroSceneRenderer {
 
     this.smoothOrbitAngle = damp(this.smoothOrbitAngle, effectiveOrbitTarget, orbitLambda, dt);
 
-    // Inertial camera lead: smoothly blended by wMonthRig so leaving/entering month never twitches
-    if (this.reducedMotion) {
-      this.trailOrbitAngle = this.smoothOrbitAngle;
-      this.camOrbitAngle = this.smoothOrbitAngle;
-    } else {
-      const chaseLambda = THREE.MathUtils.lerp(14.0, 7.5, this.wMonthRig);
-      const maxLag = THREE.MathUtils.lerp(0.025, 0.075, this.wMonthRig);
-      const nextTrail = damp(this.trailOrbitAngle, this.smoothOrbitAngle, chaseLambda, dt);
-      const rawLag = this.smoothOrbitAngle - nextTrail;
-      const softLag = maxLag * Math.tanh(rawLag / maxLag);
-      this.trailOrbitAngle = this.smoothOrbitAngle - softLag;
-      this.camOrbitAngle = this.smoothOrbitAngle + softLag;
-    }
-
     // Keep Earth's axial spin locked to the same damper as Earth's orbit
     this.smoothSpinAngle = damp(this.smoothSpinAngle, effectiveSpinTarget, orbitLambda, dt);
 
@@ -2521,14 +2629,11 @@ export class AstroSceneRenderer {
     if (!this.monthDragging && this.dragMonthFraction === 0) {
       if (
         Math.abs(this.targetOrbitAngle - this.smoothOrbitAngle) < 0.0005 &&
-        Math.abs(this.smoothOrbitAngle - this.trailOrbitAngle) < 0.0005 &&
         Math.abs(this.smoothOrbitAngle) > Math.PI * 8
       ) {
         const shift = Math.round(this.smoothOrbitAngle / TWO_PI) * TWO_PI;
         this.targetOrbitAngle -= shift;
         this.smoothOrbitAngle -= shift;
-        this.trailOrbitAngle -= shift;
-        this.camOrbitAngle -= shift;
       }
       if (
         Math.abs(this.targetSpinAngle - this.smoothSpinAngle) < 0.0005 &&
@@ -2730,6 +2835,12 @@ export class AstroSceneRenderer {
     );
 
     this.updateOrbitTransform(dt);
+
+    if (this.pendingMode !== null && !this.isCurrentValueAnimating()) {
+      const nextMode = this.pendingMode;
+      this.pendingMode = null;
+      this.commitMode(nextMode);
+    }
 
     if (this.flight.active) {
       this.stepFlight(dt);
