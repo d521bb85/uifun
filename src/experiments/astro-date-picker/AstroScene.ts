@@ -1,5 +1,13 @@
 import * as THREE from "three";
 import {
+  ASTRO_TEXTURE_KEYS,
+  ASTRO_TEXTURE_SPECS,
+  type AstroTextureKey,
+  getAstroAssetsSnapshot,
+  getCachedAstroTextureImage,
+  preloadAstroAssets,
+} from "./astroAssets";
+import {
   type AstroState,
   addDateSegment,
   computeAstroState,
@@ -93,15 +101,6 @@ export {
   type SceneValueAnimationState,
   type SetModeOptions,
 };
-
-function resolveTextureBase(): string {
-  const base =
-    typeof import.meta !== "undefined" && import.meta.env?.BASE_URL
-      ? import.meta.env.BASE_URL
-      : "/";
-  const normalized = base.endsWith("/") ? base.slice(0, -1) : base;
-  return `${normalized}/textures/astro`;
-}
 
 interface CameraFlight {
   active: boolean;
@@ -284,6 +283,7 @@ export class AstroSceneRenderer {
   };
 
   private readonly textures: THREE.Texture[] = [];
+  private readonly textureByKey = new Map<AstroTextureKey, THREE.Texture>();
   private readonly geometries: THREE.BufferGeometry[] = [];
   private readonly materials: THREE.Material[] = [];
 
@@ -292,6 +292,10 @@ export class AstroSceneRenderer {
   private pendingMode: AstroFocusMode | null = null;
   private sceneInteractive = false;
   private onSceneInteractiveChange: ((interactive: boolean) => void) | null = null;
+  private assetsReady = false;
+  private texturesSettled = false;
+  private started = false;
+  private onAssetsReadyChange: ((ready: boolean) => void) | null = null;
   private onContextRestored: (() => void) | null = null;
   private active = true;
   private pageVisible = true;
@@ -525,41 +529,49 @@ export class AstroSceneRenderer {
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(36, 460 / 290, 0.05, 400);
 
-    const textureBase = resolveTextureBase();
-    const loader = new THREE.TextureLoader();
+    const assetsPromise = preloadAstroAssets();
     const maxAnisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
-    const loadTex = (file: string, srgb = true) => {
-      const url = `${textureBase}/${file}`;
-      const tex = loader.load(
-        url,
-        () => {
-          if (this.disposed) {
-            tex.dispose();
-            return;
-          }
-          this.renderSingleFrame();
-        },
-        undefined,
-        () => {
-          // Degrade gracefully if a texture fails to fetch (offline / CDN error)
-        },
-      );
-      tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+    const loadTex = (key: AstroTextureKey) => {
+      const cached = getCachedAstroTextureImage(key);
+      const tex = cached ? new THREE.Texture(cached) : new THREE.Texture();
+      tex.colorSpace = ASTRO_TEXTURE_SPECS[key].srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
       tex.wrapS = THREE.RepeatWrapping;
       tex.wrapT = THREE.ClampToEdgeWrapping;
       tex.anisotropy = maxAnisotropy;
+      if (cached) {
+        tex.needsUpdate = true;
+      }
       this.textures.push(tex);
+      this.textureByKey.set(key, tex);
       return tex;
     };
 
-    const earthDayMap = loadTex("earth_day.jpg", true);
-    const earthNightMap = loadTex("earth_night.jpg", true);
-    const earthCloudsMap = loadTex("earth_clouds.jpg", false);
-    const earthSpecMap = loadTex("earth_specular.jpg", false);
-    const earthNormalMap = loadTex("earth_normal.jpg", false);
-    const moonAlbedoMap = loadTex("moon_albedo.jpg", true);
-    const milkyWayMap = loadTex("milky_way.jpg", true);
-    const sunSurfaceMap = loadTex("sun_surface.jpg", true);
+    const earthDayMap = loadTex("earthDay");
+    const earthNightMap = loadTex("earthNight");
+    const earthCloudsMap = loadTex("earthClouds");
+    const earthSpecMap = loadTex("earthSpecular");
+    const earthNormalMap = loadTex("earthNormal");
+    const moonAlbedoMap = loadTex("moonAlbedo");
+    const milkyWayMap = loadTex("milkyWay");
+    const sunSurfaceMap = loadTex("sunSurface");
+
+    if (getAstroAssetsSnapshot().ready) {
+      this.texturesSettled = true;
+    } else {
+      void assetsPromise.then((loaded) => {
+        if (this.disposed) return;
+        for (const key of ASTRO_TEXTURE_KEYS) {
+          const img = loaded[key];
+          const tex = this.textureByKey.get(key);
+          if (img && tex && tex.image !== img) {
+            tex.image = img;
+            tex.needsUpdate = true;
+          }
+        }
+        this.texturesSettled = true;
+        this.tryFinalizeAssetsReady();
+      });
+    }
 
     const collector = { geometries: this.geometries, materials: this.materials };
 
@@ -890,6 +902,26 @@ export class AstroSceneRenderer {
 
   setOnContextRestored(listener: (() => void) | null) {
     this.onContextRestored = listener;
+  }
+
+  setOnAssetsReadyChange(listener: ((ready: boolean) => void) | null) {
+    this.onAssetsReadyChange = listener;
+    listener?.(this.assetsReady);
+  }
+
+  isAssetsReady(): boolean {
+    return this.assetsReady;
+  }
+
+  private tryFinalizeAssetsReady() {
+    if (this.disposed || this.assetsReady || !this.started || !this.texturesSettled) return;
+    if (!this.contextLost) {
+      this.renderer.compile(this.scene, this.camera);
+      this.renderSingleFrame();
+    }
+    this.assetsReady = true;
+    this.syncLoopState();
+    this.onAssetsReadyChange?.(true);
   }
 
   resize(width: number, height: number) {
@@ -1401,7 +1433,12 @@ export class AstroSceneRenderer {
 
   private shouldRunLoop(): boolean {
     return (
-      !this.disposed && this.active && this.pageVisible && !this.reducedMotion && !this.contextLost
+      !this.disposed &&
+      this.assetsReady &&
+      this.active &&
+      this.pageVisible &&
+      !this.reducedMotion &&
+      !this.contextLost
     );
   }
 
@@ -1452,17 +1489,22 @@ export class AstroSceneRenderer {
 
   start() {
     if (this.disposed) return;
-    this.renderSingleFrame();
-    this.syncLoopState();
+    this.started = true;
+    this.tryFinalizeAssetsReady();
+    if (this.assetsReady) {
+      this.syncLoopState();
+    }
   }
 
   dispose() {
     this.disposed = true;
     this.onSceneInteractiveChange = null;
+    this.onAssetsReadyChange = null;
     this.onContextRestored = null;
     this.stopLoop();
     this.canvas.removeEventListener("webglcontextlost", this.handleContextLost, false);
     this.canvas.removeEventListener("webglcontextrestored", this.handleContextRestored, false);
+    this.textureByKey.clear();
     for (const tex of this.textures) tex.dispose();
     for (const geo of this.geometries) geo.dispose();
     for (const mat of this.materials) mat.dispose();
@@ -1953,7 +1995,7 @@ export class AstroSceneRenderer {
   }
 
   private renderSingleFrame() {
-    if (this.disposed || this.contextLost) return;
+    if (this.disposed || this.contextLost || !this.texturesSettled) return;
     this.renderer.render(this.scene, this.camera);
   }
 

@@ -1,0 +1,135 @@
+.card {
+  position: relative;
+  width: min(460px, 100%);
+  aspect-ratio: 85.6 / 53.98;
+  container-type: inline-size;
+  border-radius: 18px;
+  overflow: hidden;
+  background: radial-gradient(circle at 50% 50%, #0a0a0c 0%, #040405 70%, #010102 100%);
+  box-shadow:
+    0 28px 64px -18px rgba(0, 0, 0, 0.58),
+    0 10px 24px -8px rgba(0, 0, 0, 0.36);
+  -webkit-user-select: none;
+  user-select: none;
+  isolation: isolate;
+}
+
+.card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 1;
+  transition: opacity 420ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.overlay[data-ready] {
+  opacity: 0;
+}
+
+.backdrop {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at 50% 50%, #0a0a0c 0%, #040405 70%, #010102 100%);
+}
+
+.stars {
+  position: absolute;
+  inset: 0;
+  background-image:
+    radial-gradient(1.1px 1.1px at 44% 14%, rgba(255, 255, 255, 0.28), transparent),
+    radial-gradient(1px 1px at 51% 24%, rgba(255, 255, 255, 0.2), transparent),
+    radial-gradient(1.2px 1.2px at 58% 18%, rgba(255, 255, 255, 0.22), transparent),
+    radial-gradient(1px 1px at 64% 35%, rgba(255, 255, 255, 0.26), transparent),
+    radial-gradient(1px 1px at 49% 46%, rgba(255, 255, 255, 0.24), transparent),
+    radial-gradient(1.1px 1.1px at 56% 52%, rgba(255, 255, 255, 0.2), transparent),
+    radial-gradient(1.2px 1.2px at 46% 68%, rgba(255, 255, 255, 0.26), transparent),
+    radial-gradient(1px 1px at 60% 72%, rgba(255, 255, 255, 0.18), transparent),
+    radial-gradient(1px 1px at 70% 60%, rgba(255, 255, 255, 0.2), transparent),
+    radial-gradient(1px 1px at 88% 18%, rgba(255, 255, 255, 0.22), transparent),
+    radial-gradient(1.1px 1.1px at 93% 44%, rgba(255, 255, 255, 0.24), transparent),
+    radial-gradient(1px 1px at 84% 58%, rgba(255, 255, 255, 0.18), transparent);
+  animation: astroSkeletonPulse 2.4s ease-in-out infinite;
+}
+
+.planet {
+  position: absolute;
+  left: -42%;
+  top: 3%;
+  width: 83%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background:
+    radial-gradient(
+      circle at 76% 42%,
+      rgba(255, 255, 255, 0.13) 0%,
+      rgba(255, 255, 255, 0.065) 34%,
+      rgba(255, 255, 255, 0.025) 58%,
+      rgba(255, 255, 255, 0.008) 76%,
+      transparent 100%
+    ),
+    radial-gradient(
+      circle at 50% 50%,
+      rgba(255, 255, 255, 0.03) 0%,
+      rgba(255, 255, 255, 0.055) 86%,
+      rgba(255, 255, 255, 0.11) 96%,
+      transparent 100%
+    );
+  filter: blur(11px);
+  animation: astroSkeletonPulse 2.4s ease-in-out infinite;
+}
+
+.sun {
+  position: absolute;
+  left: 80.5%;
+  top: 36%;
+  width: 26%;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(255, 255, 255, 0.26) 0%,
+    rgba(255, 255, 255, 0.14) 22%,
+    rgba(255, 255, 255, 0.05) 44%,
+    rgba(255, 255, 255, 0.015) 64%,
+    transparent 78%
+  );
+  filter: blur(7px);
+  animation: astroSkeletonPulse 2.4s ease-in-out 0.35s infinite;
+}
+
+@keyframes astroSkeletonPulse {
+  0%,
+  100% {
+    opacity: 0.68;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .overlay {
+    transition: none;
+  }
+
+  .stars,
+  .planet,
+  .sun {
+    animation: none;
+    opacity: 0.85;
+  }
+}

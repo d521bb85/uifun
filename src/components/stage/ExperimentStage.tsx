@@ -74,7 +74,14 @@ export function ExperimentStage({
     return () => observer.disconnect();
   }, [standalone]);
 
+  useEffect(() => {
+    if (active) {
+      experiment.preload();
+    }
+  }, [active, experiment]);
+
   const ExperimentComponent = experiment.Component;
+  const Fallback = experiment.Fallback;
 
   return (
     <section
@@ -87,7 +94,7 @@ export function ExperimentStage({
     >
       <StageProvider value={{ active, surface: experiment.surface }}>
         <StageErrorBoundary>
-          <Suspense fallback={null}>
+          <Suspense fallback={Fallback ? <Fallback /> : null}>
             <ExperimentComponent />
           </Suspense>
         </StageErrorBoundary>

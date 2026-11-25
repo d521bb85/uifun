@@ -83,6 +83,9 @@ function renderExperiment(slug: string) {
 const experimentRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/e/$slug",
+  loader: ({ params }) => {
+    getExperimentBySlug(params.slug)?.preload();
+  },
   component: function ExperimentRoutePage() {
     const { slug } = experimentRoute.useParams();
     return renderExperiment(slug);

@@ -9,6 +9,8 @@ export interface ExperimentEntry {
   description?: string;
   surface: StageSurface;
   Component: ComponentType;
+  Fallback?: ComponentType;
+  preload: () => void;
 }
 
 interface ExperimentModule {
@@ -30,7 +32,31 @@ function extractSlug(filePath: string): string {
 export const experiments: readonly ExperimentEntry[] = Object.entries(modules)
   .map(([filePath, mod]): ExperimentEntry => {
     const def = mod.default;
-    const Component = def.load ? lazy(def.load) : def.component;
+    let Component: ComponentType;
+    let triggerChunkLoad: (() => void) | undefined;
+    if (def.load) {
+      const load = def.load;
+      let pendingLoad: Promise<{ default: ComponentType }> | null = null;
+      const loadModule = () => {
+        if (!pendingLoad) {
+          pendingLoad = load().catch((err: unknown) => {
+            pendingLoad = null;
+            throw err;
+          });
+        }
+        return pendingLoad;
+      };
+      Component = lazy(loadModule);
+      triggerChunkLoad = () => {
+        void loadModule();
+      };
+    } else {
+      Component = def.component;
+    }
+    const preload = () => {
+      triggerChunkLoad?.();
+      def.preload?.();
+    };
     return {
       slug: extractSlug(filePath),
       title: def.title,
@@ -39,6 +65,8 @@ export const experiments: readonly ExperimentEntry[] = Object.entries(modules)
       description: def.description,
       surface: def.surface ?? "auto",
       Component,
+      Fallback: def.fallback,
+      preload,
     };
   })
   .sort((a, b) => b.date.localeCompare(a.date) || a.slug.localeCompare(b.slug));

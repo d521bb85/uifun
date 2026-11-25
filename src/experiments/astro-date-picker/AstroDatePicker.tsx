@@ -16,7 +16,9 @@ import {
 } from "react";
 import { useStageActive } from "@/components/stage/StageContext";
 import styles from "./AstroDatePicker.module.css";
-import { type AstroFocusMode, AstroSceneRenderer } from "./AstroScene";
+import { AstroDatePickerSkeletonOverlay } from "./AstroDatePickerSkeleton";
+import type { AstroFocusMode, AstroSceneRenderer } from "./AstroScene";
+import { preloadAstroAssets, preloadAstroScene } from "./astroAssets";
 import { computeAstroState, getTodayIsoDate, parseIsoDate } from "./astronomy";
 import {
   classifyDragIntent,
@@ -93,6 +95,8 @@ export function AstroDatePicker({
   const activeIso = isControlled && value && parseIsoDate(value) ? value : lastValidIso;
 
   const [focusMode, setFocusMode] = useState<AstroFocusMode>("idle");
+  const [assetsReady, setAssetsReady] = useState(false);
+  const [skeletonMounted, setSkeletonMounted] = useState(true);
   const [sceneInteractive, setSceneInteractive] = useState(false);
   const [dragging, setDragging] = useState(false);
 
@@ -132,6 +136,8 @@ export function AstroDatePicker({
   astroStateRef.current = astroState;
 
   useEffect(() => {
+    void preloadAstroAssets();
+    const sceneModulePromise = preloadAstroScene();
     const canvas = canvasRef.current;
     const card = cardRef.current;
     if (!canvas || !card) return;
@@ -141,6 +147,7 @@ export function AstroDatePicker({
         ? window.matchMedia("(prefers-reduced-motion: reduce)")
         : null;
 
+    let SceneRendererCtor: typeof import("./AstroScene")["AstroSceneRenderer"] | null = null;
     let currentScene: AstroSceneRenderer | null = null;
     let unmounted = false;
 
@@ -151,17 +158,19 @@ export function AstroDatePicker({
     };
 
     const mountScene = () => {
-      if (unmounted) return;
+      if (unmounted || !SceneRendererCtor) return;
       currentScene?.dispose();
-      currentScene = AstroSceneRenderer.create(canvas, astroStateRef.current);
+      currentScene = SceneRendererCtor.create(canvas, astroStateRef.current);
       rendererRef.current = currentScene;
 
       if (!currentScene) {
         // WebGL unavailable (e.g. restricted or headless environment): still allow drag scrubbing
+        setAssetsReady(true);
         setSceneInteractive(true);
         return;
       }
 
+      currentScene.setOnAssetsReadyChange(setAssetsReady);
       currentScene.setOnSceneInteractiveChange(setSceneInteractive);
       currentScene.setOnContextRestored(mountScene);
       currentScene.setReducedMotion(motionQuery?.matches ?? false);
@@ -174,7 +183,17 @@ export function AstroDatePicker({
       currentScene.start();
     };
 
-    mountScene();
+    void sceneModulePromise
+      .then((mod) => {
+        if (unmounted) return;
+        SceneRendererCtor = mod.AstroSceneRenderer;
+        mountScene();
+      })
+      .catch(() => {
+        if (unmounted) return;
+        setAssetsReady(true);
+        setSceneInteractive(true);
+      });
 
     const handleMotionChange = (event: MediaQueryListEvent) => {
       currentScene?.setReducedMotion(event.matches);
@@ -225,6 +244,27 @@ export function AstroDatePicker({
       rendererRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (!assetsReady) {
+      setSkeletonMounted(true);
+      return;
+    }
+
+    const reducedMotion =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reducedMotion) {
+      setSkeletonMounted(false);
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setSkeletonMounted(false);
+    }, 450);
+    return () => window.clearTimeout(timeoutId);
+  }, [assetsReady]);
 
   useEffect(() => {
     rendererRef.current?.setState(astroState);
@@ -607,6 +647,7 @@ export function AstroDatePicker({
       ref={cardRef}
       className={cardClassName}
       disabled={disabled}
+      data-assets-loading={assetsReady ? undefined : ""}
       data-focus-mode={focusMode}
       data-scene-ready={sceneInteractive && focusMode !== "idle" && !readOnly ? "" : undefined}
       data-dragging={dragging ? "" : undefined}
@@ -624,6 +665,7 @@ export function AstroDatePicker({
       onLostPointerCapture={finishDrag}
     >
       <canvas ref={canvasRef} className={styles.canvas} />
+      {skeletonMounted ? <AstroDatePickerSkeletonOverlay ready={assetsReady} /> : null}
       <div className={styles.scrim} aria-hidden="true" />
       <FieldLabel
         className={styles.label}

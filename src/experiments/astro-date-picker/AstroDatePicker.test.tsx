@@ -1,6 +1,7 @@
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { AstroDatePicker } from "./AstroDatePicker";
+import { AstroDatePickerSkeleton } from "./AstroDatePickerSkeleton";
 
 describe("AstroDatePicker", () => {
   it("renders cleanly during SSR with default and custom props without browser globals", () => {
@@ -63,5 +64,15 @@ describe("AstroDatePicker", () => {
     const html = renderToString(<AstroDatePicker label="Empty date" value={null} />);
     expect(html).toContain("Empty date");
     expect(html).toContain("<canvas");
+    expect(html).toContain("data-assets-loading");
+    expect(html).toContain("data-astro-skeleton");
+  });
+
+  it("renders a control-shaped standalone skeleton cleanly during SSR", () => {
+    const html = renderToString(<AstroDatePickerSkeleton className="custom-skeleton" />);
+    expect(html).toContain('role="status"');
+    expect(html).toContain('aria-busy="true"');
+    expect(html).toContain("custom-skeleton");
+    expect(html).toContain("data-astro-skeleton");
   });
 });

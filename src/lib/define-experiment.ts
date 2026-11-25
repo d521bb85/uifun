@@ -13,6 +13,10 @@ export interface ExperimentBaseMeta {
   description?: string;
   /** Preferred initial stage surface. Defaults to "auto" (follows system/app theme). */
   surface?: StageSurface;
+  /** Lightweight control-shaped skeleton rendered while a lazy experiment chunk loads. */
+  fallback?: ComponentType;
+  /** Optional hook to warm external assets (textures, audio, etc.) before mount. */
+  preload?: () => void;
 }
 
 export type ExperimentDefinition = ExperimentBaseMeta &
