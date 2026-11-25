@@ -459,6 +459,7 @@ void main() {
 export const oceanFragmentShader = /* glsl */ `
 uniform float uTime;
 uniform vec3 uMoonDir;
+uniform vec3 uLocalCamPos;
 uniform float uMoonIllumination;
 uniform float uSwellEnergy;
 uniform float uTideLevel;
@@ -568,7 +569,8 @@ float waveField(vec2 p, float t) {
 
 void main() {
   vec2 xz = vLocalPos.xz;
-  float distCam = length(cameraPosition - vWorldPos);
+  vec3 localToCam = uLocalCamPos - vLocalPos;
+  float distCam = length(localToCam);
   float distZ = max(0.0, 2.0 - vLocalPos.z);
 
   float shoreX = shoreCenterX(vLocalPos.z);
@@ -703,7 +705,7 @@ void main() {
   float detailFade = mix(1.0, 0.35, clamp(distCam / 26.0, 0.0, 1.0));
   float eps = mix(0.024, 0.095, clamp(distCam / 28.0, 0.0, 1.0));
 
-  vec3 V = normalize(cameraPosition - vWorldPos);
+  vec3 V = normalize(localToCam);
   vec3 L = normalize(uMoonDir);
   float illumPow = pow(clamp(uMoonIllumination, 0.0001, 1.0), 0.85);
   // Directional moonlight specular (glitter path & wet-sand glint) drops realistically near zero at New Moon,
@@ -895,7 +897,13 @@ void main() {
   vec3 limbCol = vec3(1.35, 0.62, 0.18) * (0.94 + 0.09 * pulse);
 
   vec3 color = mix(limbCol, coreCol, limbDarkening) * (0.78 + 0.48 * tex);
-  gl_FragColor = vec4(color, uOpacity);
+  // Attenuate HDR disc intensity & soften limb faster than the corona so the Sun melts
+  // smoothly into its golden glow without ever leaving a bare white circle; exact 1:1 at uOpacity == 1.0.
+  float op = max(uOpacity, 0.0);
+  float colorFade = pow(op, 1.4);
+  float alphaFade = pow(op, 2.2);
+  float edgeSoft = mix(smoothstep(0.02, 0.58, ndv), 1.0, smoothstep(0.65, 1.0, op));
+  gl_FragColor = vec4(color * colorFade, alphaFade * edgeSoft);
 }
 `;
 
@@ -940,8 +948,10 @@ void main() {
     vec3(0.82, 0.46, 0.22) * outerHalo +
     vec3(0.88, 0.92, 1.0) * streak;
 
-  float alpha = clamp((core + innerHalo + midHalo + outerHalo + streak) * uOpacity, 0.0, 1.0);
-  gl_FragColor = vec4(col * uOpacity, alpha);
+  // Keep core and golden outer halo fading in lockstep with a gentle perceptual curve
+  float baseAlpha = clamp(core + innerHalo + midHalo + outerHalo + streak, 0.0, 1.0);
+  float fade = pow(max(uOpacity, 0.0), 1.5);
+  gl_FragColor = vec4(col * fade, baseAlpha);
 }
 `;
 
@@ -1050,6 +1060,7 @@ uniform sampler2D uSkyMap;
 uniform float uBrightness;
 uniform float uGamma;
 uniform float uGalacticReveal;
+uniform float uOpacity;
 
 varying vec2 vUv;
 
@@ -1105,7 +1116,7 @@ void main() {
   float texLuma = dot(lifted, vec3(0.299, 0.587, 0.114));
   vec3 enhanced = baseSky * (1.0 + uGalacticReveal * 0.85) + nebula * (0.42 + 0.9 * texLuma) * uGalacticReveal;
 
-  gl_FragColor = vec4(enhanced, 1.0);
+  gl_FragColor = vec4(enhanced, uOpacity);
 }
 `;
 

@@ -51,7 +51,7 @@ const CAROUSEL_EARTH_SCALE = 1.0;
 const J2000_OBLIQUITY_RAD = THREE.MathUtils.degToRad(23.43929111);
 const TWO_PI = Math.PI * 2;
 
-const DAY_STAGE_Y = -18;
+const UP_AXIS = new THREE.Vector3(0, 1, 0);
 const DAY_MOON_BASE_RADIUS = 0.5;
 const DAY_MOON_POS = new THREE.Vector3(-0.06, 2.38, -3.6);
 const DAY_CAM_LOCAL_POS = new THREE.Vector3(0.0, 1.28, 4.6);
@@ -68,9 +68,18 @@ const MOON_ORBIT_DRIFT_SPEED = 0.72;
 const MOON_ORBIT_DRIFT_ACCEL = 2.4;
 const MOON_ORBIT_ARRIVAL_BAND = 0.24;
 
+interface EarthCameraRig {
+  radial: number;
+  tangent: number;
+  height: number;
+  targetWeight: number;
+  targetY: number;
+  focusFollow: number;
+}
+
 // Hero (idle) framing: Earth fills the left corner (~1/3 of the card) with static Sun upper-right
 // and the Moon orbiting honestly across its true 360° geocentric ecliptic path.
-const HERO_RIG = {
+const HERO_RIG: EarthCameraRig = {
   radial: 1.12,
   tangent: 2.29,
   height: 0.8,
@@ -81,7 +90,7 @@ const HERO_RIG = {
 
 // Orbital Carousel (month) framing: three-quarter sunlit angle on Earth (~30% lit disc) with
 // static Sun anchored upper-right and gentle, damped horizontal drift during drag.
-const CAROUSEL_RIG = {
+const CAROUSEL_RIG: EarthCameraRig = {
   radial: 2.5,
   tangent: 4.9,
   height: 3.1,
@@ -89,6 +98,190 @@ const CAROUSEL_RIG = {
   targetY: -0.22,
   focusFollow: 0.0,
 };
+
+type FlightSpace = "cylindrical" | "cartesian";
+
+interface ModeVisualTargets {
+  wEarth: number;
+  wOrbitalMoon: number;
+  wSun: number;
+  wMoon: number;
+  wOcean: number;
+  wGalactic: number;
+  wMonthGuide: number;
+  wYearGuide: number;
+  wDayGuide: number;
+  wMonthRig: number;
+  starHorizonClip: number;
+  skyBright: number;
+  skyGamma: number;
+  skyReveal: number;
+  sunScale: number;
+}
+
+interface CameraFlight {
+  active: boolean;
+  fromMode: CosmicFocusMode;
+  toMode: CosmicFocusMode;
+  space: FlightSpace;
+  elapsed: number;
+  duration: number;
+  arcHeight: number;
+  startPos: THREE.Vector3;
+  startCyl: THREE.Vector3;
+  startYaw: number;
+  startPitch: number;
+  lastGoalAz: number;
+  lastGoalYaw: number;
+  velPos: THREE.Vector3;
+  velCyl: THREE.Vector3;
+  velYaw: number;
+  velPitch: number;
+  startSunScale: number;
+  startSunPos: THREE.Vector3;
+  startMoonOrbitRadius: number;
+  startSkyBright: number;
+  startSkyGamma: number;
+  startSkyReveal: number;
+  startWYearSky: number;
+  startYearSkyDrift: number;
+  startGalLonShift: number;
+  startWEarth: number;
+  startWOrbitalMoon: number;
+  startWSun: number;
+  startWMoon: number;
+  startWOcean: number;
+  startWGalactic: number;
+  startWMonthGuide: number;
+  startWYearGuide: number;
+  startWDayGuide: number;
+  startWMonthRig: number;
+  startStarHorizonClip: number;
+}
+
+function getModeVisualTargets(mode: CosmicFocusMode): ModeVisualTargets {
+  return {
+    wEarth: mode === "idle" || mode === "month" ? 1 : 0,
+    wOrbitalMoon: mode === "idle" || mode === "month" ? 1 : 0,
+    wSun: mode === "idle" || mode === "month" || mode === "year" ? 1 : 0,
+    wMoon: mode === "day" ? 1 : 0,
+    wOcean: mode === "day" ? 1 : 0,
+    wGalactic: mode === "year" ? 1 : 0,
+    wMonthGuide: mode === "month" ? 1 : 0,
+    wYearGuide: mode === "year" ? 1 : 0,
+    wDayGuide: mode === "day" ? 1 : 0,
+    wMonthRig: mode === "month" ? 1 : 0,
+    starHorizonClip: mode === "day" ? 1 : 0,
+    skyBright: mode === "year" ? 1.02 : mode === "month" ? 0.52 : mode === "day" ? 0.24 : 0.48,
+    skyGamma: mode === "year" ? 0.74 : mode === "month" ? 0.83 : mode === "day" ? 0.88 : 0.84,
+    skyReveal: mode === "year" ? 1 : mode === "month" ? 0.22 : mode === "day" ? 0.03 : 0.16,
+    sunScale: mode === "year" ? 0.34 : mode === "month" ? 0.78 : 0.56,
+  };
+}
+
+const FLIGHT_EASE_OUT_POWER = 1.75;
+
+function getTransitionDuration(from: CosmicFocusMode, to: CosmicFocusMode): number {
+  if ((from === "idle" && to === "month") || (from === "month" && to === "idle")) return 0.94;
+  if ((from === "idle" && to === "day") || (from === "day" && to === "idle")) return 1.02;
+  if ((from === "idle" && to === "year") || (from === "year" && to === "idle")) return 1.04;
+  if ((from === "month" && to === "year") || (from === "year" && to === "month")) return 1.04;
+  if ((from === "month" && to === "day") || (from === "day" && to === "month")) return 1.12;
+  return 1.14; // year <-> day
+}
+
+function smootherstep(t: number): number {
+  const c = THREE.MathUtils.clamp(t, 0, 1);
+  return c * c * c * (c * (c * 6 - 15) + 10);
+}
+
+/**
+ * Asymmetric cosmic ease-in-out curve:
+ * - Zero initial velocity (no frame-1 twitch), brisk acceleration into the flight
+ * - Longer, velvety C² ease-out cushion at the end so the camera settles smoothly into place
+ */
+function flightEase(u: number): number {
+  const c = THREE.MathUtils.clamp(u, 0, 1);
+  const ss = c * c * (3 - 2 * c);
+  return 1 - (1 - ss) ** FLIGHT_EASE_OUT_POWER;
+}
+
+function windowProgress(u: number, start: number, end: number): number {
+  return smootherstep((u - start) / Math.max(end - start, 1e-4));
+}
+
+function phaseWeight(
+  startVal: number,
+  targetVal: number,
+  u: number,
+  inStart: number,
+  inEnd: number,
+  outStart: number,
+  outEnd: number,
+): number {
+  if (Math.abs(targetVal - startVal) < 1e-4) return targetVal;
+  const p =
+    targetVal > startVal ? windowProgress(u, inStart, inEnd) : windowProgress(u, outStart, outEnd);
+  return THREE.MathUtils.lerp(startVal, targetVal, p);
+}
+
+/**
+ * Smooth asymmetric Hermite flight interpolation:
+ * - From rest (startVel = 0): zero initial velocity, swift glide, velvety C² ease-out landing.
+ * - Mid-flight redirect (startVel != 0): preserves incoming velocity seamlessly while curving
+ *   to the new destination and settling softly at zero velocity & zero acceleration.
+ */
+function quinticHermite(
+  start: number,
+  target: number,
+  startVel: number,
+  duration: number,
+  u: number,
+): number {
+  const c = THREE.MathUtils.clamp(u, 0, 1);
+  const c2 = c * c;
+  const c3 = c2 * c;
+  const c4 = c3 * c;
+  const c5 = c4 * c;
+  const s = flightEase(c);
+  const m = c - 6 * c3 + 8 * c4 - 3 * c5;
+  const delta = target - start;
+  let velTerm = startVel * duration;
+  // Softly damp carryover when reversing direction mid-flight so turns stay graceful with minimal overshoot
+  if (velTerm * delta < 0) {
+    velTerm *= 0.55;
+  }
+  const maxVelTerm = Math.max(Math.abs(delta) * 1.4, 0.35);
+  velTerm = THREE.MathUtils.clamp(velTerm, -maxVelTerm, maxVelTerm);
+  return start + delta * s + velTerm * m;
+}
+
+function dirToYawPitch(dir: THREE.Vector3): [number, number] {
+  const yaw = Math.atan2(-dir.x, -dir.z);
+  const pitch = Math.asin(THREE.MathUtils.clamp(dir.y, -0.999, 0.999));
+  return [yaw, pitch];
+}
+
+function yawPitchToDir(yaw: number, pitch: number, out: THREE.Vector3): THREE.Vector3 {
+  const cosP = Math.cos(pitch);
+  return out.set(-Math.sin(yaw) * cosP, Math.sin(pitch), -Math.cos(yaw) * cosP);
+}
+
+function pointToSegmentDistanceXZ(
+  px: number,
+  pz: number,
+  ax: number,
+  az: number,
+  bx: number,
+  bz: number,
+): number {
+  const dx = bx - ax;
+  const dz = bz - az;
+  const lenSq = dx * dx + dz * dz;
+  if (lenSq < 1e-8) return Math.hypot(px - ax, pz - az);
+  const t = THREE.MathUtils.clamp(((px - ax) * dx + (pz - az) * dz) / lenSq, 0, 1);
+  return Math.hypot(px - (ax + t * dx), pz - (az + t * dz));
+}
 
 function damp(current: number, target: number, lambda: number, dt: number): number {
   return THREE.MathUtils.lerp(current, target, 1 - Math.exp(-lambda * dt));
@@ -206,13 +399,23 @@ export class CosmicSceneRenderer {
 
   private readonly skyGroup: THREE.Group;
   private readonly skyMesh: THREE.Mesh;
+  private readonly yearSkyMesh: THREE.Mesh;
   private readonly astroSkyQuat: THREE.Quaternion;
   private readonly yearSkyQuat: THREE.Quaternion;
+  private readonly yearSkyQuatWorld = new THREE.Quaternion();
   private readonly skyUniforms: {
     uSkyMap: { value: THREE.Texture };
     uBrightness: { value: number };
     uGamma: { value: number };
     uGalacticReveal: { value: number };
+    uOpacity: { value: number };
+  };
+  private readonly yearSkyUniforms: {
+    uSkyMap: { value: THREE.Texture };
+    uBrightness: { value: number };
+    uGamma: { value: number };
+    uGalacticReveal: { value: number };
+    uOpacity: { value: number };
   };
   private readonly starUniforms: {
     uPixelRatio: { value: number };
@@ -224,6 +427,7 @@ export class CosmicSceneRenderer {
     uMoonIllum: { value: number };
   };
 
+  private readonly yearStageGroup: THREE.Group;
   private readonly galacticDustGroup: THREE.Group;
   private readonly galacticDustUniforms: {
     uPixelRatio: { value: number };
@@ -246,6 +450,7 @@ export class CosmicSceneRenderer {
   };
 
   private readonly sunGroup: THREE.Group;
+  private readonly sunMaterial: THREE.ShaderMaterial;
   private readonly sunUniforms: {
     uSunMap: { value: THREE.Texture };
     uTime: { value: number };
@@ -260,6 +465,7 @@ export class CosmicSceneRenderer {
   private readonly earthOrbitRoot: THREE.Group;
   private readonly earthAxisGroup: THREE.Group;
   private readonly earthSpinGroup: THREE.Group;
+  private readonly earthMaterial: THREE.ShaderMaterial;
   private readonly earthUniforms: {
     uDayMap: { value: THREE.Texture };
     uNightMap: { value: THREE.Texture };
@@ -283,6 +489,7 @@ export class CosmicSceneRenderer {
 
   private readonly orbitalMoonGroup: THREE.Group;
   private readonly orbitalMoonMesh: THREE.Mesh;
+  private readonly orbitalMoonMaterial: THREE.ShaderMaterial;
   private readonly orbitalMoonUniforms: {
     uMoonMap: { value: THREE.Texture };
     uSunDir: { value: THREE.Vector3 };
@@ -297,6 +504,7 @@ export class CosmicSceneRenderer {
     uMoonIllumination: { value: number };
   };
   private readonly moonMesh: THREE.Mesh;
+  private readonly moonMaterial: THREE.ShaderMaterial;
   private readonly moonUniforms: {
     uMoonMap: { value: THREE.Texture };
     uSunDir: { value: THREE.Vector3 };
@@ -319,6 +527,7 @@ export class CosmicSceneRenderer {
     uWetTideMemory: { value: number };
     uSwellEnergy: { value: number };
     uMoonDir: { value: THREE.Vector3 };
+    uLocalCamPos: { value: THREE.Vector3 };
     uMoonIllumination: { value: number };
     uOpacity: { value: number };
   };
@@ -338,13 +547,32 @@ export class CosmicSceneRenderer {
 
   private readonly camPos = new THREE.Vector3();
   private readonly camTarget = new THREE.Vector3();
-  private readonly polarCamPos = new THREE.Vector3();
-  private readonly polarCamTarget = new THREE.Vector3();
-  private readonly nonEarthCamPos = new THREE.Vector3();
-  private readonly nonEarthCamTarget = new THREE.Vector3();
-  private readonly desiredNonEarthPos = new THREE.Vector3();
-  private readonly desiredNonEarthTarget = new THREE.Vector3();
+  private readonly prevCamPos = new THREE.Vector3();
+  private readonly goalCamPos = new THREE.Vector3();
+  private readonly goalCamTarget = new THREE.Vector3();
+  private readonly tmpDir = new THREE.Vector3();
+  private readonly tmpVec = new THREE.Vector3();
+  private readonly tmpQuat = new THREE.Quaternion();
   private readonly tmpSunDir = new THREE.Vector3();
+  private readonly sunYearLocalPos = new THREE.Vector3();
+  private readonly sunYearWorldPos = new THREE.Vector3();
+
+  private curCamYaw = 0;
+  private curCamPitch = 0;
+  private prevCamYaw = 0;
+  private prevCamPitch = 0;
+  private readonly curVelPos = new THREE.Vector3();
+  private readonly curVelCyl = new THREE.Vector3();
+  private curVelYaw = 0;
+  private curVelPitch = 0;
+
+  private yearYaw = 0;
+  private dayYaw = 0;
+  private prevSmoothEpochYears = 0;
+  private smoothGalLonShift = 0;
+  private smoothSunScale = 0.56;
+  private wYearSky = 0;
+  private yearSkyDriftOffset = 0;
 
   private targetOrbitAngle: number;
   private smoothOrbitAngle: number;
@@ -420,14 +648,6 @@ export class CosmicSceneRenderer {
   private smoothEpochYears: number;
   private smoothPrecession: number;
 
-  private rigRadial = HERO_RIG.radial;
-  private rigTangent = HERO_RIG.tangent;
-  private rigHeight = HERO_RIG.height;
-  private rigTargetWeight = HERO_RIG.targetWeight;
-  private rigTargetY = HERO_RIG.targetY;
-  private rigFocusFollow = HERO_RIG.focusFollow;
-  private earthRigBlend = 1;
-
   private wEarth = 1;
   private wOrbitalMoon = 1;
   private wSun = 1;
@@ -437,9 +657,51 @@ export class CosmicSceneRenderer {
   private wMonthGuide = 0;
   private wYearGuide = 0;
   private wDayGuide = 0;
+  private wMonthRig = 0;
+  private starHorizonClip = 0;
   private smoothSkyBright = 0.48;
   private smoothSkyGamma = 0.84;
   private smoothSkyReveal = 0.16;
+
+  private readonly flight: CameraFlight = {
+    active: false,
+    fromMode: "idle",
+    toMode: "idle",
+    space: "cylindrical",
+    elapsed: 0,
+    duration: 0.9,
+    arcHeight: 0,
+    startPos: new THREE.Vector3(),
+    startCyl: new THREE.Vector3(),
+    startYaw: 0,
+    startPitch: 0,
+    lastGoalAz: 0,
+    lastGoalYaw: 0,
+    velPos: new THREE.Vector3(),
+    velCyl: new THREE.Vector3(),
+    velYaw: 0,
+    velPitch: 0,
+    startSunScale: 0.56,
+    startSunPos: new THREE.Vector3(),
+    startMoonOrbitRadius: HERO_MOON_ORBIT_RADIUS,
+    startSkyBright: 0.48,
+    startSkyGamma: 0.84,
+    startSkyReveal: 0.16,
+    startWYearSky: 0,
+    startYearSkyDrift: 0,
+    startGalLonShift: 0,
+    startWEarth: 1,
+    startWOrbitalMoon: 1,
+    startWSun: 1,
+    startWMoon: 0,
+    startWOcean: 0,
+    startWGalactic: 0,
+    startWMonthGuide: 0,
+    startWYearGuide: 0,
+    startWDayGuide: 0,
+    startWMonthRig: 0,
+    startStarHorizonClip: 0,
+  };
 
   private constructor(canvas: HTMLCanvasElement, initialState: CosmicState) {
     this.cosmicState = initialState;
@@ -471,6 +733,7 @@ export class CosmicSceneRenderer {
     this.smoothSwellEnergy = initialState.tidal.swellEnergy;
 
     this.smoothEpochYears = initialState.galactic.epochYearsSinceJ2000;
+    this.prevSmoothEpochYears = this.smoothEpochYears;
     this.smoothPrecession = initialState.galactic.axialPrecessionRad;
     this.updateMonthNeighbors();
     this.updateDayNeighbors();
@@ -519,6 +782,7 @@ export class CosmicSceneRenderer {
       uBrightness: { value: this.smoothSkyBright },
       uGamma: { value: this.smoothSkyGamma },
       uGalacticReveal: { value: this.smoothSkyReveal },
+      uOpacity: { value: 1 },
     };
     const skyMaterial = new THREE.ShaderMaterial({
       vertexShader: skyboxVertexShader,
@@ -529,6 +793,7 @@ export class CosmicSceneRenderer {
     });
     this.materials.push(skyMaterial);
     const skyMesh = new THREE.Mesh(skyGeo, skyMaterial);
+    skyMesh.renderOrder = -2;
     // True J2000 Galactic plane orientation for Hero/Month/Day (aligned with Hipparcos stars)
     const galBasis = new THREE.Matrix4().makeBasis(
       new THREE.Vector3(...GALACTIC_ECLIPTIC_BASIS.center),
@@ -540,9 +805,35 @@ export class CosmicSceneRenderer {
     this.yearSkyQuat = new THREE.Quaternion().setFromEuler(
       new THREE.Euler(0.04, Math.PI * 0.5, 0.33, "ZYX"),
     );
+    this.yearSkyQuatWorld.copy(this.yearSkyQuat);
     skyMesh.quaternion.copy(this.astroSkyQuat);
     this.skyMesh = skyMesh;
     this.skyGroup.add(skyMesh);
+
+    // Separate galactic dome for Year mode so the Milky Way emerges gently from transparency
+    // with only a subtle drift instead of swinging 100°+ across the fixed Hipparcos stars
+    this.yearSkyUniforms = {
+      uSkyMap: { value: milkyWayMap },
+      uBrightness: { value: 1.02 },
+      uGamma: { value: 0.74 },
+      uGalacticReveal: { value: 1.0 },
+      uOpacity: { value: 0 },
+    };
+    const yearSkyMaterial = new THREE.ShaderMaterial({
+      vertexShader: skyboxVertexShader,
+      fragmentShader: skyboxFragmentShader,
+      uniforms: this.yearSkyUniforms,
+      side: THREE.BackSide,
+      transparent: true,
+      depthWrite: false,
+    });
+    this.materials.push(yearSkyMaterial);
+    const yearSkyMesh = new THREE.Mesh(skyGeo, yearSkyMaterial);
+    yearSkyMesh.quaternion.copy(this.yearSkyQuatWorld);
+    yearSkyMesh.renderOrder = -1;
+    yearSkyMesh.visible = false;
+    this.yearSkyMesh = yearSkyMesh;
+    this.skyGroup.add(yearSkyMesh);
 
     const {
       geometry: starGeo,
@@ -553,10 +844,11 @@ export class CosmicSceneRenderer {
     this.skyGroup.add(new THREE.Points(starGeo, starMat));
     this.scene.add(this.skyGroup);
 
+    this.yearStageGroup = new THREE.Group();
     const { group: galGroup, uniforms: galUniforms } = this.createGalacticRibbon();
     this.galacticDustGroup = galGroup;
     this.galacticDustUniforms = galUniforms;
-    this.scene.add(this.galacticDustGroup);
+    this.yearStageGroup.add(this.galacticDustGroup);
 
     const { mesh: orbitGuideMesh, uniforms: orbitGuideUniforms } = this.createOrbitGuide();
     this.orbitGuideMesh = orbitGuideMesh;
@@ -566,7 +858,8 @@ export class CosmicSceneRenderer {
     const { mesh: galacticGuideMesh, uniforms: galacticGuideUniforms } = this.createGalacticGuide();
     this.galacticGuideMesh = galacticGuideMesh;
     this.galacticGuideUniforms = galacticGuideUniforms;
-    this.scene.add(this.galacticGuideMesh);
+    this.yearStageGroup.add(this.galacticGuideMesh);
+    this.scene.add(this.yearStageGroup);
 
     this.sunGroup = new THREE.Group();
     const sunGeo = new THREE.SphereGeometry(0.72, 48, 48);
@@ -582,6 +875,7 @@ export class CosmicSceneRenderer {
       uniforms: this.sunUniforms,
       transparent: true,
     });
+    this.sunMaterial = sunMaterial;
     this.materials.push(sunMaterial);
     this.sunGroup.add(new THREE.Mesh(sunGeo, sunMaterial));
 
@@ -629,6 +923,7 @@ export class CosmicSceneRenderer {
       uniforms: this.earthUniforms,
       transparent: true,
     });
+    this.earthMaterial = earthMaterial;
     this.materials.push(earthMaterial);
     this.earthSpinGroup.add(new THREE.Mesh(earthGeo, earthMaterial));
 
@@ -687,6 +982,7 @@ export class CosmicSceneRenderer {
       uniforms: this.orbitalMoonUniforms,
       transparent: true,
     });
+    this.orbitalMoonMaterial = orbitalMoonMaterial;
     this.materials.push(orbitalMoonMaterial);
     this.orbitalMoonMesh = new THREE.Mesh(orbitalMoonGeo, orbitalMoonMaterial);
     this.orbitalMoonMesh.rotation.order = "YXZ";
@@ -696,7 +992,6 @@ export class CosmicSceneRenderer {
     this.scene.add(this.earthOrbitRoot);
 
     this.dayStageGroup = new THREE.Group();
-    this.dayStageGroup.position.set(0, DAY_STAGE_Y, 0);
 
     const moonHaloGeo = new THREE.PlaneGeometry(3.8, 3.8);
     this.geometries.push(moonHaloGeo);
@@ -732,6 +1027,7 @@ export class CosmicSceneRenderer {
       uniforms: this.moonUniforms,
       transparent: true,
     });
+    this.moonMaterial = moonMaterial;
     this.materials.push(moonMaterial);
     this.moonMesh = new THREE.Mesh(moonGeo, moonMaterial);
     this.moonMesh.position.copy(DAY_MOON_POS);
@@ -752,6 +1048,7 @@ export class CosmicSceneRenderer {
       uWetTideMemory: { value: initialState.tidal.springNeapIndex },
       uSwellEnergy: { value: initialState.tidal.swellEnergy },
       uMoonDir: { value: DAY_MOON_DIR.clone() },
+      uLocalCamPos: { value: DAY_CAM_LOCAL_POS.clone() },
       uMoonIllumination: { value: initialState.lunar.illumination },
       uOpacity: { value: 0 },
     };
@@ -771,10 +1068,18 @@ export class CosmicSceneRenderer {
     this.scene.add(this.dayStageGroup);
 
     this.updateOrbitTransform(0);
-    this.computeEarthRigCamera(this.polarCamPos, this.polarCamTarget);
-    this.computeNonEarthCameraGoal("year", this.nonEarthCamPos, this.nonEarthCamTarget);
-    this.camPos.copy(this.polarCamPos);
-    this.camTarget.copy(this.polarCamTarget);
+    this.computeEarthRigCamera(HERO_RIG, this.camPos, this.camTarget);
+    this.prevCamPos.copy(this.camPos);
+    const [initYaw, initPitch] = dirToYawPitch(
+      this.tmpDir.copy(this.camTarget).sub(this.camPos).normalize(),
+    );
+    this.curCamYaw = initYaw;
+    this.curCamPitch = initPitch;
+    this.prevCamYaw = initYaw;
+    this.prevCamPitch = initPitch;
+
+    this.setYearYaw(Math.atan2(this.camPos.x, this.camPos.z));
+    this.repositionDayStage("idle");
     this.applyUniforms();
   }
 
@@ -1151,9 +1456,10 @@ export class CosmicSceneRenderer {
 
   private createCoastalGeometry() {
     // Non-uniform coastal mesh concentrating vertex density in the foreground swash & surf zone
-    // while extending cleanly out to the distant oceanic horizon (z = -115)
+    // while extending cleanly out to the distant oceanic horizon (z = -115) and back to z = +5.8
+    // so elevated atmospheric descent/ascent glides never reveal a near or side mesh edge.
     const segX = 180;
-    const segZ = 156;
+    const segZ = 168;
     const cols = segX + 1;
     const rows = segZ + 1;
     const positions = new Float32Array(cols * rows * 3);
@@ -1161,11 +1467,11 @@ export class CosmicSceneRenderer {
 
     for (let iz = 0; iz <= segZ; iz += 1) {
       const tz = iz / segZ;
-      // Smooth non-linear depth stretch: very dense near z ∈ [+3.2, -16], wide toward horizon
-      const z = 3.2 - 118.2 * tz ** 2.35;
+      // Smooth non-linear depth stretch: very dense near z ∈ [+5.8, -16], wide toward horizon
+      const z = 5.8 - 120.8 * tz ** 2.35;
       // Horizontal span expands proportionally with perspective depth so full FOV is always covered
       const depthFromCam = Math.max(2.0, DAY_CAM_LOCAL_POS.z - z);
-      const halfWidth = Math.max(7.5, depthFromCam * 0.68);
+      const halfWidth = Math.max(8.5, depthFromCam * 0.78);
 
       for (let ix = 0; ix <= segX; ix += 1) {
         const tx = (ix / segX) * 2 - 1;
@@ -1365,9 +1671,209 @@ export class CosmicSceneRenderer {
     }
   }
 
+  private setYearYaw(yaw: number) {
+    this.yearYaw = yaw;
+    this.yearStageGroup.rotation.y = yaw;
+    this.tmpQuat.setFromAxisAngle(UP_AXIS, yaw);
+    this.yearSkyQuatWorld.multiplyQuaternions(this.tmpQuat, this.yearSkyQuat);
+  }
+
+  private repositionDayStage(fromMode: CosmicFocusMode) {
+    if (fromMode === "idle" || fromMode === "month") {
+      // Descend directly toward Earth's dark night hemisphere so entering Day feels like
+      // calmly dropping from orbit through the atmosphere down onto Earth's night coastline.
+      const earthPos = this.earthOrbitRoot.position;
+      const dx = earthPos.x - this.camPos.x;
+      const dz = earthPos.z - this.camPos.z;
+      const horizDist = Math.hypot(dx, dz) || 1;
+      const dirX = dx / horizDist;
+      const dirZ = dz / horizDist;
+
+      this.dayYaw = Math.atan2(-dirX, -dirZ);
+
+      const targetSurfaceRadius = fromMode === "month" ? 0.58 : 0.64;
+      const landingPos = this.tmpVec.set(
+        earthPos.x - dirX * targetSurfaceRadius,
+        earthPos.y + 0.08,
+        earthPos.z - dirZ * targetSurfaceRadius,
+      );
+
+      const rotatedLocalCam = this.tmpDir
+        .copy(DAY_CAM_LOCAL_POS)
+        .applyAxisAngle(UP_AXIS, this.dayYaw);
+      this.dayStageGroup.rotation.y = this.dayYaw;
+      this.dayStageGroup.position.copy(landingPos).sub(rotatedLocalCam);
+      return;
+    }
+
+    // From Year (galactic scale): glide forward & downward along current sightline (0° yaw spin)
+    this.dayYaw = this.curCamYaw;
+    const lookX = -Math.sin(this.dayYaw);
+    const lookZ = -Math.cos(this.dayYaw);
+
+    const landingPos = this.tmpVec.set(
+      this.camPos.x + lookX * 3.8,
+      this.camPos.y - 1.1,
+      this.camPos.z + lookZ * 3.8,
+    );
+
+    const rotatedLocalCam = this.tmpDir
+      .copy(DAY_CAM_LOCAL_POS)
+      .applyAxisAngle(UP_AXIS, this.dayYaw);
+    this.dayStageGroup.rotation.y = this.dayYaw;
+    this.dayStageGroup.position.copy(landingPos).sub(rotatedLocalCam);
+  }
+
+  private updateSunYearGoal() {
+    const ambientTime = this.reducedMotion ? 0 : this.elapsed;
+    const galPhase = this.smoothEpochYears * 0.042;
+    this.sunYearLocalPos.set(
+      Math.sin(galPhase * 0.45) * 1.45 + Math.sin(ambientTime * 0.14) * 0.06,
+      Math.sin(galPhase * 0.45) * 0.48 + Math.cos(ambientTime * 0.11) * 0.035,
+      Math.cos(galPhase * 0.45) * 0.35 - 0.35,
+    );
+    this.sunYearWorldPos.copy(this.sunYearLocalPos).applyAxisAngle(UP_AXIS, this.yearYaw);
+  }
+
+  private startFlight(fromMode: CosmicFocusMode, toMode: CosmicFocusMode) {
+    const wasFlying = this.flight.active;
+    const prevFromMode = this.flight.fromMode;
+    const prevProgress = wasFlying
+      ? THREE.MathUtils.clamp(this.flight.elapsed / Math.max(this.flight.duration, 1e-4), 0, 1)
+      : 1;
+
+    if (toMode === "year") {
+      // Align the galactic stage to the camera's current azimuth so transitioning into Year
+      // is a single serene pan/pull-out without ever spinning or crossing through the Sun.
+      if (fromMode === "day" && this.wOcean > 0.25) {
+        this.setYearYaw(this.dayYaw);
+      } else {
+        this.setYearYaw(Math.atan2(this.camPos.x, this.camPos.z));
+      }
+      this.updateSunYearGoal();
+    } else if (toMode === "day" && this.wOcean < 0.15) {
+      this.repositionDayStage(fromMode);
+    }
+
+    this.computeModeCameraGoal(toMode, this.goalCamPos, this.goalCamTarget);
+
+    let space: FlightSpace = "cylindrical";
+    let arcHeight = 0;
+    if (toMode === "day" || fromMode === "day") {
+      arcHeight =
+        fromMode === "month" || toMode === "month"
+          ? 0.32
+          : fromMode === "year" || toMode === "year"
+            ? 0.26
+            : 0.2;
+      if (toMode === "day") {
+        space = "cartesian";
+      } else {
+        // Day -> Idle/Month/Year: lift straight back off the beach unless the path crosses near the Sun
+        const startAz = Math.atan2(this.camPos.x, this.camPos.z);
+        const goalAz = Math.atan2(this.goalCamPos.x, this.goalCamPos.z);
+        const azDiff = Math.abs(shortestAngleDelta(startAz, goalAz));
+        const sunClearance = pointToSegmentDistanceXZ(
+          0,
+          0,
+          this.camPos.x,
+          this.camPos.z,
+          this.goalCamPos.x,
+          this.goalCamPos.z,
+        );
+        space = azDiff > 0.72 || sunClearance < 2.6 ? "cylindrical" : "cartesian";
+      }
+    }
+
+    const baseDuration = getTransitionDuration(fromMode, toMode);
+    // If reversing a partial flight mid-way, scale duration proportionally so quick redirects feel crisp
+    const duration =
+      wasFlying && toMode === prevFromMode
+        ? baseDuration * THREE.MathUtils.clamp(0.55 + 0.45 * prevProgress, 0.55, 1.0)
+        : baseDuration;
+
+    const f = this.flight;
+    f.active = true;
+    f.fromMode = fromMode;
+    f.toMode = toMode;
+    f.space = space;
+    f.elapsed = 0;
+    f.duration = duration;
+    f.arcHeight = arcHeight;
+
+    f.startPos.copy(this.camPos);
+    f.startCyl.set(
+      Math.atan2(this.camPos.x, this.camPos.z),
+      Math.hypot(this.camPos.x, this.camPos.z),
+      this.camPos.y,
+    );
+    f.startYaw = this.curCamYaw;
+    f.startPitch = this.curCamPitch;
+
+    const initGoalAz = Math.atan2(this.goalCamPos.x, this.goalCamPos.z);
+    f.lastGoalAz = f.startCyl.x + shortestAngleDelta(f.startCyl.x, initGoalAz);
+    const [initGoalYaw] = dirToYawPitch(
+      this.tmpDir.copy(this.goalCamTarget).sub(this.goalCamPos).normalize(),
+    );
+    f.lastGoalYaw = f.startYaw + shortestAngleDelta(f.startYaw, initGoalYaw);
+
+    if (wasFlying) {
+      f.velPos.copy(this.curVelPos);
+      f.velCyl.copy(this.curVelCyl);
+      f.velYaw = this.curVelYaw;
+      f.velPitch = this.curVelPitch;
+    } else {
+      f.velPos.set(0, 0, 0);
+      f.velCyl.set(0, 0, 0);
+      f.velYaw = 0;
+      f.velPitch = 0;
+    }
+
+    f.startSunScale =
+      this.wSun < 0.01 ? getModeVisualTargets(toMode).sunScale : this.smoothSunScale;
+    f.startSunPos.copy(
+      this.wSun < 0.01 && toMode === "year" ? this.sunYearWorldPos : this.sunGroup.position,
+    );
+    const moonDistFactor = this.cosmicState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM;
+    const destMoonOrbitRadius =
+      (toMode === "month" ? CAROUSEL_MOON_ORBIT_RADIUS : HERO_MOON_ORBIT_RADIUS) * moonDistFactor;
+    f.startMoonOrbitRadius =
+      this.wOrbitalMoon < 0.01 ? destMoonOrbitRadius : this.smoothMoonOrbitRadius;
+    const destTargets = getModeVisualTargets(toMode);
+    if (this.wYearSky > 0.99 && toMode !== "year") {
+      // Leaving Year while astro sky is fully covered: align astro sky directly to destination
+      // so cross-fading Year out cleanly reveals the destination sky without brightness jumps
+      f.startSkyBright = destTargets.skyBright;
+      f.startSkyGamma = destTargets.skyGamma;
+      f.startSkyReveal = destTargets.skyReveal;
+    } else {
+      f.startSkyBright = this.smoothSkyBright;
+      f.startSkyGamma = this.smoothSkyGamma;
+      f.startSkyReveal = this.smoothSkyReveal;
+    }
+    f.startWYearSky = this.wYearSky;
+    f.startYearSkyDrift =
+      toMode === "year" && this.wYearSky < 0.05 ? -0.045 : this.yearSkyDriftOffset;
+    f.startGalLonShift = shortestAngleDelta(0, this.smoothGalLonShift);
+
+    f.startWEarth = this.wEarth;
+    f.startWOrbitalMoon = this.wOrbitalMoon;
+    f.startWSun = this.wSun;
+    f.startWMoon = this.wMoon;
+    f.startWOcean = this.wOcean;
+    f.startWGalactic = this.wGalactic;
+    f.startWMonthGuide = this.wMonthGuide;
+    f.startWYearGuide = this.wYearGuide;
+    f.startWDayGuide = this.wDayGuide;
+    f.startWMonthRig = this.wMonthRig;
+    f.startStarHorizonClip = this.starHorizonClip;
+  }
+
   setMode(mode: CosmicFocusMode) {
     if (this.mode === mode) return;
+    const prevMode = this.mode;
     this.mode = mode;
+
     if (mode !== "month") {
       this.monthDragging = false;
       this.dragMonthFraction = 0;
@@ -1375,8 +1881,8 @@ export class CosmicSceneRenderer {
     if (mode !== "day") {
       this.dayDragging = false;
       this.dragDayFraction = 0;
-    } else {
-      // Entering Day mode: align ocean immediately to the current date's tidal level
+    } else if (this.wOcean < 0.01) {
+      // Entering Day mode while ocean is hidden: align immediately to the current date's tidal level
       this.smoothTideLevel = this.cosmicState.tidal.springNeapIndex;
       this.smoothWetTideMemory = this.smoothTideLevel;
       this.smoothSwellEnergy = this.cosmicState.tidal.swellEnergy;
@@ -1384,14 +1890,20 @@ export class CosmicSceneRenderer {
       this.swellVelocity = 0;
     }
 
-    if ((mode === "day" || mode === "year") && this.earthRigBlend > 0.95) {
-      this.computeNonEarthCameraGoal(mode, this.nonEarthCamPos, this.nonEarthCamTarget);
-    }
-
     if (!this.active || this.reducedMotion) {
+      if (mode === "year") {
+        this.setYearYaw(
+          prevMode === "day" ? this.dayYaw : Math.atan2(this.camPos.x, this.camPos.z),
+        );
+      } else if (mode === "day") {
+        this.repositionDayStage(prevMode);
+      }
       this.snapToTargets();
       this.renderSingleFrame();
+      return;
     }
+
+    this.startFlight(prevMode, mode);
   }
 
   setReducedMotion(reduced: boolean) {
@@ -1435,6 +1947,7 @@ export class CosmicSceneRenderer {
   }
 
   private snapToTargets() {
+    this.flight.active = false;
     this.monthDragging = false;
     this.dragMonthFraction = 0;
     this.dayDragging = false;
@@ -1474,59 +1987,54 @@ export class CosmicSceneRenderer {
     this.swellVelocity = 0;
 
     this.smoothEpochYears = this.cosmicState.galactic.epochYearsSinceJ2000;
+    this.prevSmoothEpochYears = this.smoothEpochYears;
     this.smoothPrecession = this.cosmicState.galactic.axialPrecessionRad;
-
-    const rig = this.mode === "month" ? CAROUSEL_RIG : HERO_RIG;
-    this.rigRadial = rig.radial;
-    this.rigTangent = rig.tangent;
-    this.rigHeight = rig.height;
-    this.rigTargetWeight = rig.targetWeight;
-    this.rigTargetY = rig.targetY;
-    this.rigFocusFollow = rig.focusFollow;
-    this.earthRigBlend = this.mode === "idle" || this.mode === "month" ? 1 : 0;
-
-    this.wEarth = this.mode === "idle" || this.mode === "month" ? 1 : 0;
-    this.wOrbitalMoon = this.mode === "idle" || this.mode === "month" ? 1 : 0;
-    this.wSun = this.mode === "idle" || this.mode === "month" || this.mode === "year" ? 1 : 0;
-    this.wMoon = this.mode === "day" ? 1 : 0;
-    this.wOcean = this.mode === "day" ? 1 : 0;
-    this.wGalactic = this.mode === "year" ? 1 : 0;
-    this.wMonthGuide = this.mode === "month" ? 1 : 0;
-    this.wYearGuide = this.mode === "year" ? 1 : 0;
-    this.wDayGuide = this.mode === "day" ? 1 : 0;
-    this.smoothSkyBright =
-      this.mode === "year"
-        ? 1.02
-        : this.mode === "month"
-          ? 0.52
-          : this.mode === "day"
-            ? 0.24
-            : 0.48;
-    this.smoothSkyGamma =
-      this.mode === "year"
-        ? 0.74
-        : this.mode === "month"
-          ? 0.83
-          : this.mode === "day"
-            ? 0.88
-            : 0.84;
-    this.smoothSkyReveal =
-      this.mode === "year" ? 1 : this.mode === "month" ? 0.22 : this.mode === "day" ? 0.03 : 0.16;
-
     if (this.mode !== "year") {
+      this.smoothGalLonShift = 0;
+    }
+
+    const targets = getModeVisualTargets(this.mode);
+    this.wEarth = targets.wEarth;
+    this.wOrbitalMoon = targets.wOrbitalMoon;
+    this.wSun = targets.wSun;
+    this.wMoon = targets.wMoon;
+    this.wOcean = targets.wOcean;
+    this.wGalactic = targets.wGalactic;
+    this.wMonthGuide = targets.wMonthGuide;
+    this.wYearGuide = targets.wYearGuide;
+    this.wDayGuide = targets.wDayGuide;
+    this.wMonthRig = targets.wMonthRig;
+    this.starHorizonClip = targets.starHorizonClip;
+    this.smoothSkyBright = targets.skyBright;
+    this.smoothSkyGamma = targets.skyGamma;
+    this.smoothSkyReveal = targets.skyReveal;
+    this.wYearSky = this.mode === "year" ? 1 : 0;
+    this.yearSkyDriftOffset = 0;
+    this.smoothSunScale = targets.sunScale;
+
+    this.updateSunYearGoal();
+    if (this.mode === "year") {
+      this.sunGroup.position.copy(this.sunYearWorldPos);
+    } else {
       this.sunGroup.position.set(0, 0, 0);
     }
-    this.sunGroup.scale.setScalar(
-      this.mode === "year" ? 0.34 : this.mode === "month" ? 0.78 : 0.56,
-    );
+    this.sunGroup.scale.setScalar(this.smoothSunScale);
 
     this.updateOrbitTransform(0);
-    this.computeEarthRigCamera(this.polarCamPos, this.polarCamTarget);
-    if (this.mode === "day" || this.mode === "year") {
-      this.computeNonEarthCameraGoal(this.mode, this.nonEarthCamPos, this.nonEarthCamTarget);
-    }
-    this.camPos.lerpVectors(this.nonEarthCamPos, this.polarCamPos, this.earthRigBlend);
-    this.camTarget.lerpVectors(this.nonEarthCamTarget, this.polarCamTarget, this.earthRigBlend);
+    this.computeModeCameraGoal(this.mode, this.camPos, this.camTarget);
+    const [yaw, pitch] = dirToYawPitch(
+      this.tmpDir.copy(this.camTarget).sub(this.camPos).normalize(),
+    );
+    this.curCamYaw = yaw;
+    this.curCamPitch = pitch;
+    this.prevCamPos.copy(this.camPos);
+    this.prevCamYaw = yaw;
+    this.prevCamPitch = pitch;
+    this.curVelPos.set(0, 0, 0);
+    this.curVelCyl.set(0, 0, 0);
+    this.curVelYaw = 0;
+    this.curVelPitch = 0;
+
     this.applyUniforms();
   }
 
@@ -1561,56 +2069,55 @@ export class CosmicSceneRenderer {
       moonLon + Math.PI - this.smoothDayLibLon,
       -(this.smoothMoonLat + this.smoothDayLibLat),
     );
-    // Physically lit by the static Sun at world origin (0, 0, 0)
-    this.orbitalMoonUniforms.uSunDir.value.set(-(ex + mx), -my, -(ez + mz)).normalize();
+    // Use true parallel heliocentric Sun rays (real Sun is ~390x farther than the Moon) so
+    // the Orbital Moon shows exact astronomical phase & matches the Day Moon terminator 1:1
+    this.orbitalMoonUniforms.uSunDir.value.copy(this.tmpSunDir);
 
     const ambientTime = this.reducedMotion ? 0 : this.elapsed;
-    const galPhase = this.smoothEpochYears * 0.042;
-    const sunArcX = Math.sin(galPhase * 0.45) * 1.45 + Math.sin(ambientTime * 0.14) * 0.06;
-    const sunArcY = Math.sin(galPhase * 0.45) * 0.48 + Math.cos(ambientTime * 0.11) * 0.035;
-    const sunArcZ = Math.cos(galPhase * 0.45) * 0.35 - 0.35;
-
-    if (this.mode === "year") {
-      this.sunGroup.position.set(
-        damp(this.sunGroup.position.x, sunArcX, 6, dt || 0.016),
-        damp(this.sunGroup.position.y, sunArcY, 6, dt || 0.016),
-        damp(this.sunGroup.position.z, sunArcZ, 6, dt || 0.016),
-      );
+    this.updateSunYearGoal();
+    if (this.mode === "year" || this.wGalactic > 0.005) {
       this.galacticDustUniforms.uDrift.value = this.smoothEpochYears * 0.36 + ambientTime * 0.085;
-    } else if (this.sunGroup.position.lengthSq() > 1e-8) {
-      this.sunGroup.position.set(
-        damp(this.sunGroup.position.x, 0, 8, dt || 0.016),
-        damp(this.sunGroup.position.y, 0, 8, dt || 0.016),
-        damp(this.sunGroup.position.z, 0, 8, dt || 0.016),
-      );
-      if (this.sunGroup.position.lengthSq() < 1e-6) {
-        this.sunGroup.position.set(0, 0, 0);
-      }
     }
 
-    const sunScale = this.mode === "year" ? 0.34 : this.mode === "month" ? 0.78 : 0.56;
-    const nextSunScale = damp(this.sunGroup.scale.x, sunScale, 5.5, dt || 0.016);
-    this.sunGroup.scale.setScalar(nextSunScale);
+    if (!this.flight.active) {
+      if (this.mode === "year") {
+        const stepDt = dt || 0.016;
+        this.sunGroup.position.set(
+          damp(this.sunGroup.position.x, this.sunYearWorldPos.x, 6, stepDt),
+          damp(this.sunGroup.position.y, this.sunYearWorldPos.y, 6, stepDt),
+          damp(this.sunGroup.position.z, this.sunYearWorldPos.z, 6, stepDt),
+        );
+      } else {
+        this.sunGroup.position.set(0, 0, 0);
+      }
+      this.sunGroup.scale.setScalar(this.smoothSunScale);
+    }
 
     this.orbitGuideMesh.scale.set(this.smoothOrbitRadius, 1, this.smoothOrbitRadius);
-    this.galacticGuideMesh.position.copy(this.sunGroup.position);
+    // Keep galactic guide locked on the Sun's center inside yearStageGroup local space
+    this.galacticGuideMesh.position
+      .copy(this.sunGroup.position)
+      .applyAxisAngle(UP_AXIS, -this.yearYaw);
 
-    // Northern Hemisphere lunar orientation (waxing illuminated on right +X, waning on left -X)
+    // Northern Hemisphere lunar orientation rotated into dayStageGroup's world yaw
     const [moonSunX, moonSunY, moonSunZ] = computeLunarSunDirectionObserver(
       this.smoothMoonElong,
       this.smoothDayLat,
     );
-    this.moonUniforms.uSunDir.value.set(moonSunX, moonSunY, moonSunZ).normalize();
+    this.moonUniforms.uSunDir.value
+      .set(moonSunX, moonSunY, moonSunZ)
+      .applyAxisAngle(UP_AXIS, this.dayYaw)
+      .normalize();
     this.moonMesh.scale.setScalar(this.smoothMoonScale);
     this.moonMesh.rotation.y = -Math.PI * 0.5 - this.smoothDayLibLon;
     this.moonMesh.rotation.x = this.smoothDayLibLat;
-
-    const galLonShift =
-      this.mode === "year" ? this.smoothEpochYears * 0.0085 + ambientTime * 0.0022 : 0;
-    this.skyGroup.rotation.y = this.smoothPrecession + galLonShift;
   }
 
-  private computeEarthRigCamera(outPos: THREE.Vector3, outTarget: THREE.Vector3) {
+  private computeEarthRigCamera(
+    rig: EarthCameraRig,
+    outPos: THREE.Vector3,
+    outTarget: THREE.Vector3,
+  ) {
     // Polar co-orbiting camera around the static Sun:
     // - In idle (Hero): tightly tracks Earth in the left corner with the Sun upper-right.
     // - In month (Orbital Carousel): trails elastically so Earth swings 1:1 left/right along
@@ -1629,45 +2136,214 @@ export class CosmicSceneRenderer {
     const swayY = Math.cos(t * 0.13) * 0.03;
 
     outPos.set(
-      anchorX + radialOutX * this.rigRadial + tangentX * (this.rigTangent + swayTangent),
-      this.rigHeight + swayY,
-      anchorZ + radialOutZ * this.rigRadial + tangentZ * (this.rigTangent + swayTangent),
+      anchorX + radialOutX * rig.radial + tangentX * (rig.tangent + swayTangent),
+      rig.height + swayY,
+      anchorZ + radialOutZ * rig.radial + tangentZ * (rig.tangent + swayTangent),
     );
 
     const ex = this.earthOrbitRoot.position.x;
     const ez = this.earthOrbitRoot.position.z;
-    const focusX = THREE.MathUtils.lerp(anchorX, ex, this.rigFocusFollow);
-    const focusZ = THREE.MathUtils.lerp(anchorZ, ez, this.rigFocusFollow);
+    const focusX = THREE.MathUtils.lerp(anchorX, ex, rig.focusFollow);
+    const focusZ = THREE.MathUtils.lerp(anchorZ, ez, rig.focusFollow);
 
-    outTarget.set(focusX * this.rigTargetWeight, this.rigTargetY, focusZ * this.rigTargetWeight);
+    outTarget.set(focusX * rig.targetWeight, rig.targetY, focusZ * rig.targetWeight);
   }
 
-  private computeNonEarthCameraGoal(
-    mode: "year" | "day",
+  private computeYearCamera(outPos: THREE.Vector3, outTarget: THREE.Vector3) {
+    const t = this.reducedMotion ? 0 : this.elapsed;
+    const swayX = Math.sin(t * 0.16) * 0.065;
+    const swayY = Math.cos(t * 0.13) * 0.04;
+    const epochDrift = Math.sin(this.smoothEpochYears * 0.019) * 0.45;
+    outPos
+      .set(epochDrift * 0.6 + swayX * 1.4, 0.25 + epochDrift * 0.12 + swayY * 1.2, 8.6)
+      .applyAxisAngle(UP_AXIS, this.yearYaw);
+    outTarget
+      .set(this.sunYearLocalPos.x * 0.42, this.sunYearLocalPos.y * 0.3, -1.2)
+      .applyAxisAngle(UP_AXIS, this.yearYaw);
+  }
+
+  private computeDayCamera(outPos: THREE.Vector3, outTarget: THREE.Vector3) {
+    // Coastal Day mode: static tripod framing in dayStageGroup's local frame (rotated by dayYaw)
+    outPos
+      .copy(DAY_CAM_LOCAL_POS)
+      .applyAxisAngle(UP_AXIS, this.dayYaw)
+      .add(this.dayStageGroup.position);
+    outTarget
+      .copy(DAY_CAM_LOCAL_TARGET)
+      .applyAxisAngle(UP_AXIS, this.dayYaw)
+      .add(this.dayStageGroup.position);
+  }
+
+  private computeModeCameraGoal(
+    mode: CosmicFocusMode,
     outPos: THREE.Vector3,
     outTarget: THREE.Vector3,
   ) {
-    if (mode === "year") {
-      const t = this.reducedMotion ? 0 : this.elapsed;
-      const swayX = Math.sin(t * 0.16) * 0.065;
-      const swayY = Math.cos(t * 0.13) * 0.04;
-      const epochDrift = Math.sin(this.smoothEpochYears * 0.019) * 0.45;
-      outPos.set(epochDrift * 0.6 + swayX * 1.4, 0.25 + epochDrift * 0.12 + swayY * 1.2, 8.6);
-      outTarget.set(this.sunGroup.position.x * 0.42, this.sunGroup.position.y * 0.3, -1.2);
-      return;
+    if (mode === "idle") {
+      this.computeEarthRigCamera(HERO_RIG, outPos, outTarget);
+    } else if (mode === "month") {
+      this.computeEarthRigCamera(CAROUSEL_RIG, outPos, outTarget);
+    } else if (mode === "year") {
+      this.computeYearCamera(outPos, outTarget);
+    } else {
+      this.computeDayCamera(outPos, outTarget);
+    }
+  }
+
+  private stepFlight(dt: number) {
+    const f = this.flight;
+    f.elapsed += dt;
+    const u = THREE.MathUtils.clamp(f.elapsed / Math.max(f.duration, 1e-4), 0, 1);
+    const s = flightEase(u);
+
+    const targets = getModeVisualTargets(f.toMode);
+    const moonDistFactor = this.cosmicState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM;
+    const targetMoonOrbitRadius =
+      (f.toMode === "month" ? CAROUSEL_MOON_ORBIT_RADIUS : HERO_MOON_ORBIT_RADIUS) * moonDistFactor;
+
+    // Smoothly phased choreography:
+    // - Guides retract early [0.00..0.26] on exit and draw in softly [0.38..0.90] on arrival
+    // - When descending to Day, keep Earth visible deeper into the dive so it swells beneath
+    //   you right before atmospheric entry dissolves seamlessly into the night ocean
+    const earthOutStart = f.toMode === "day" ? 0.22 : 0.14;
+    const earthOutEnd = f.toMode === "day" ? 0.52 : 0.48;
+    const dayInStart = f.fromMode === "idle" || f.fromMode === "month" ? 0.3 : 0.28;
+    const dayInEnd = f.fromMode === "idle" || f.fromMode === "month" ? 0.78 : 0.76;
+
+    this.wEarth = phaseWeight(
+      f.startWEarth,
+      targets.wEarth,
+      u,
+      0.26,
+      0.7,
+      earthOutStart,
+      earthOutEnd,
+    );
+    this.wOrbitalMoon = phaseWeight(
+      f.startWOrbitalMoon,
+      targets.wOrbitalMoon,
+      u,
+      0.26,
+      0.7,
+      0.12,
+      0.44,
+    );
+    this.wSun = phaseWeight(f.startWSun, targets.wSun, u, 0.24, 0.8, 0.08, 0.6);
+    this.wMoon = phaseWeight(f.startWMoon, targets.wMoon, u, dayInStart, dayInEnd, 0.05, 0.42);
+    this.wOcean = phaseWeight(f.startWOcean, targets.wOcean, u, dayInStart, dayInEnd, 0.05, 0.42);
+    this.wGalactic = phaseWeight(f.startWGalactic, targets.wGalactic, u, 0.22, 0.82, 0.05, 0.44);
+    this.wMonthGuide = phaseWeight(
+      f.startWMonthGuide,
+      targets.wMonthGuide,
+      u,
+      0.38,
+      0.9,
+      0.0,
+      0.26,
+    );
+    this.wYearGuide = phaseWeight(f.startWYearGuide, targets.wYearGuide, u, 0.38, 0.9, 0.0, 0.26);
+    this.wDayGuide = phaseWeight(f.startWDayGuide, targets.wDayGuide, u, 0.4, 0.9, 0.0, 0.26);
+    this.wMonthRig = THREE.MathUtils.lerp(f.startWMonthRig, targets.wMonthRig, s);
+    this.starHorizonClip = phaseWeight(
+      f.startStarHorizonClip,
+      targets.starHorizonClip,
+      u,
+      0.28,
+      0.78,
+      0.06,
+      0.44,
+    );
+
+    if (f.toMode !== "year") {
+      this.smoothSkyBright = THREE.MathUtils.lerp(f.startSkyBright, targets.skyBright, s);
+      this.smoothSkyGamma = THREE.MathUtils.lerp(f.startSkyGamma, targets.skyGamma, s);
+      this.smoothSkyReveal = THREE.MathUtils.lerp(f.startSkyReveal, targets.skyReveal, s);
     }
 
-    // Coastal Day mode: strictly static tripod framing showing the diagonal beach, ocean waves,
-    // and Moon anchored calmly in the upper sky while the engineering guide slides through it.
-    const stageY = this.dayStageGroup.position.y;
-    outPos.set(DAY_CAM_LOCAL_POS.x, stageY + DAY_CAM_LOCAL_POS.y, DAY_CAM_LOCAL_POS.z);
-    outTarget.set(DAY_CAM_LOCAL_TARGET.x, stageY + DAY_CAM_LOCAL_TARGET.y, DAY_CAM_LOCAL_TARGET.z);
+    const targetWYearSky = f.toMode === "year" ? 1 : 0;
+    this.wYearSky = phaseWeight(f.startWYearSky, targetWYearSky, u, 0.12, 0.88, 0.06, 0.72);
+    const targetYearSkyDrift = f.toMode === "year" ? 0 : 0.045;
+    this.yearSkyDriftOffset = THREE.MathUtils.lerp(f.startYearSkyDrift, targetYearSkyDrift, s);
+
+    if (f.toMode !== "year") {
+      this.smoothGalLonShift = THREE.MathUtils.lerp(f.startGalLonShift, 0, s);
+    }
+
+    this.smoothSunScale = THREE.MathUtils.lerp(f.startSunScale, targets.sunScale, s);
+    this.sunGroup.scale.setScalar(this.smoothSunScale);
+
+    const targetSunPos = f.toMode === "year" ? this.sunYearWorldPos : this.tmpVec.set(0, 0, 0);
+    this.sunGroup.position.lerpVectors(f.startSunPos, targetSunPos, s);
+    this.galacticGuideMesh.position
+      .copy(this.sunGroup.position)
+      .applyAxisAngle(UP_AXIS, -this.yearYaw);
+
+    this.smoothMoonOrbitRadius = THREE.MathUtils.lerp(
+      f.startMoonOrbitRadius,
+      targetMoonOrbitRadius,
+      s,
+    );
+    const moonLon = this.smoothOrbitAngle + this.smoothMoonRelAngle;
+    const cosMoonLat = Math.cos(this.smoothMoonLat);
+    this.orbitalMoonGroup.position.set(
+      cosMoonLat * Math.cos(moonLon) * this.smoothMoonOrbitRadius,
+      Math.sin(this.smoothMoonLat) * this.smoothMoonOrbitRadius,
+      -cosMoonLat * Math.sin(moonLon) * this.smoothMoonOrbitRadius,
+    );
+
+    // Evaluate live camera goal for destination mode so orbit/drag/sway merges cleanly at arrival
+    this.computeModeCameraGoal(f.toMode, this.goalCamPos, this.goalCamTarget);
+
+    // Subtle bell-curve flare arc for smooth spacecraft-like coastal descent/liftoff
+    const flare = f.arcHeight * 16 * s * s * (1 - s) * (1 - s);
+
+    if (f.space === "cylindrical") {
+      const goalAz = Math.atan2(this.goalCamPos.x, this.goalCamPos.z);
+      const goalR = Math.hypot(this.goalCamPos.x, this.goalCamPos.z);
+      const goalY = this.goalCamPos.y;
+      f.lastGoalAz += shortestAngleDelta(f.lastGoalAz, goalAz);
+
+      const az = quinticHermite(f.startCyl.x, f.lastGoalAz, f.velCyl.x, f.duration, u);
+      const r = quinticHermite(f.startCyl.y, goalR, f.velCyl.y, f.duration, u);
+      const y = quinticHermite(f.startCyl.z, goalY, f.velCyl.z, f.duration, u) + flare;
+      this.camPos.set(Math.sin(az) * r, y, Math.cos(az) * r);
+    } else {
+      this.camPos.set(
+        quinticHermite(f.startPos.x, this.goalCamPos.x, f.velPos.x, f.duration, u),
+        quinticHermite(f.startPos.y, this.goalCamPos.y, f.velPos.y, f.duration, u) + flare,
+        quinticHermite(f.startPos.z, this.goalCamPos.z, f.velPos.z, f.duration, u),
+      );
+    }
+
+    // Interpolate camera orientation directly in spherical (yaw, pitch) for cinema-grade
+    // constant-feel angular pan rate free of perspective-distance speed distortion
+    const [goalYaw, goalPitch] = dirToYawPitch(
+      this.tmpDir.copy(this.goalCamTarget).sub(this.goalCamPos).normalize(),
+    );
+    f.lastGoalYaw += shortestAngleDelta(f.lastGoalYaw, goalYaw);
+    this.curCamYaw = shortestAngleDelta(
+      0,
+      quinticHermite(f.startYaw, f.lastGoalYaw, f.velYaw, f.duration, u),
+    );
+    this.curCamPitch = THREE.MathUtils.clamp(
+      quinticHermite(f.startPitch, goalPitch, f.velPitch, f.duration, u),
+      -Math.PI * 0.48,
+      Math.PI * 0.48,
+    );
+
+    yawPitchToDir(this.curCamYaw, this.curCamPitch, this.tmpDir);
+    this.camTarget.copy(this.camPos).addScaledVector(this.tmpDir, 10);
+
+    if (u >= 1) {
+      f.active = false;
+    }
   }
 
   private applyUniforms() {
     this.earthUniforms.uSunDir.value.copy(this.tmpSunDir);
     this.earthUniforms.uCloudOffset.value = this.elapsed * (this.reducedMotion ? 0 : 0.0022);
     this.earthUniforms.uOpacity.value = this.wEarth;
+    this.earthMaterial.depthWrite = this.wEarth > 0.98;
 
     this.cloudsUniforms.uSunDir.value.copy(this.tmpSunDir);
     this.cloudsUniforms.uCloudOffset.value = this.elapsed * (this.reducedMotion ? 0 : 0.0022);
@@ -1684,16 +2360,19 @@ export class CosmicSceneRenderer {
     );
     this.orbitalMoonUniforms.uEarthshine.value = (1 - orbitalIllum) ** 1.35;
     this.orbitalMoonUniforms.uOpacity.value = this.wOrbitalMoon;
+    this.orbitalMoonMaterial.depthWrite = this.wOrbitalMoon > 0.98;
     this.orbitalMoonGroup.visible = this.wOrbitalMoon > 0.005;
 
     this.sunUniforms.uTime.value = this.elapsed;
     this.sunUniforms.uOpacity.value = this.wSun;
+    this.sunMaterial.depthWrite = this.wSun > 0.98;
     this.sunCoronaUniforms.uTime.value = this.elapsed;
     this.sunCoronaUniforms.uOpacity.value = this.wSun;
     this.sunGroup.visible = this.wSun > 0.005;
 
     this.moonUniforms.uEarthshine.value = this.smoothMoonEarthshine;
     this.moonUniforms.uOpacity.value = this.wMoon;
+    this.moonMaterial.depthWrite = this.wMoon > 0.98;
     this.moonHaloUniforms.uMoonIllumination.value = this.smoothMoonIllum;
     this.moonHaloUniforms.uOpacity.value = this.wMoon;
     this.moonHaloMesh.visible = this.wMoon > 0.005;
@@ -1711,6 +2390,10 @@ export class CosmicSceneRenderer {
     this.oceanUniforms.uSwellEnergy.value = this.smoothSwellEnergy;
     this.oceanUniforms.uMoonIllumination.value = this.smoothMoonIllum;
     this.oceanUniforms.uOpacity.value = this.wOcean;
+    this.oceanUniforms.uLocalCamPos.value
+      .copy(this.camPos)
+      .sub(this.dayStageGroup.position)
+      .applyAxisAngle(UP_AXIS, -this.dayYaw);
     this.dayStageGroup.visible = this.wMoon > 0.005 || this.wOcean > 0.005;
 
     this.galacticDustUniforms.uTime.value = this.elapsed;
@@ -1725,20 +2408,33 @@ export class CosmicSceneRenderer {
     this.galacticGuideUniforms.uDrift.value = this.galacticDustUniforms.uDrift.value;
     this.galacticGuideMesh.visible = this.wYearGuide > 0.005;
 
-    this.skyMesh.quaternion.slerpQuaternions(this.astroSkyQuat, this.yearSkyQuat, this.wGalactic);
+    this.skyMesh.quaternion.copy(this.astroSkyQuat);
+    this.skyMesh.visible = this.wYearSky < 0.995;
+    this.skyGroup.rotation.y = this.smoothPrecession + this.smoothGalLonShift;
     this.skyUniforms.uBrightness.value = this.smoothSkyBright;
     this.skyUniforms.uGamma.value = this.smoothSkyGamma;
     this.skyUniforms.uGalacticReveal.value = this.smoothSkyReveal;
+
+    this.tmpQuat.setFromAxisAngle(UP_AXIS, this.yearSkyDriftOffset);
+    this.yearSkyMesh.quaternion.multiplyQuaternions(this.tmpQuat, this.yearSkyQuatWorld);
+    this.yearSkyUniforms.uOpacity.value = this.wYearSky;
+    this.yearSkyMesh.visible = this.wYearSky > 0.005;
     this.starUniforms.uTime.value = this.reducedMotion ? 0 : this.elapsed;
-    this.starUniforms.uSizeScale.value = THREE.MathUtils.lerp(1, 1.24, this.wOcean);
-    this.starUniforms.uHorizonClip.value = this.wOcean;
+    this.starUniforms.uSizeScale.value = THREE.MathUtils.lerp(1, 1.24, this.starHorizonClip);
+    this.starUniforms.uHorizonClip.value = this.starHorizonClip;
+    this.starUniforms.uMoonDir.value
+      .copy(DAY_MOON_DIR)
+      .applyAxisAngle(UP_AXIS, this.dayYaw)
+      .normalize();
     this.starUniforms.uMoonIllum.value = this.smoothMoonIllum;
 
     this.camera.position.copy(this.camPos);
     this.camera.lookAt(this.camTarget);
     this.skyGroup.position.copy(this.camera.position);
     this.sunCoronaMesh.quaternion.copy(this.camera.quaternion);
-    this.moonHaloMesh.quaternion.copy(this.camera.quaternion);
+    // Cancel dayStageGroup's Y-yaw so moonHaloMesh stays strictly camera-facing in world space
+    this.tmpQuat.setFromAxisAngle(UP_AXIS, -this.dayYaw);
+    this.moonHaloMesh.quaternion.multiplyQuaternions(this.tmpQuat, this.camera.quaternion);
   }
 
   private renderSingleFrame() {
@@ -1761,8 +2457,7 @@ export class CosmicSceneRenderer {
     const orbitLambda = this.reducedMotion ? 60 : this.monthDragging ? 12.5 : 6.5;
     const dayLambda = this.reducedMotion ? 60 : this.dayDragging ? 18.0 : 9.5;
     const astroLambda = this.reducedMotion ? 60 : 7.5;
-    const camLambda = this.reducedMotion ? 60 : 5.6;
-    const fadeLambda = this.reducedMotion ? 60 : 6.4;
+    const settleLambda = this.reducedMotion ? 60 : 6.0;
 
     const dragFraction = this.reducedMotion ? 0 : this.dragMonthFraction;
     const orbitOffset =
@@ -1774,15 +2469,13 @@ export class CosmicSceneRenderer {
 
     this.smoothOrbitAngle = damp(this.smoothOrbitAngle, effectiveOrbitTarget, orbitLambda, dt);
 
-    // Inertial camera lead: camera smoothly leads slightly ahead of Earth in the drag direction
-    // so Earth shifts subtly opposite the drag (as if trailing with planetary mass/inertia)
-    // and gently catches up on release without any abrupt clamp or overshoot.
+    // Inertial camera lead: smoothly blended by wMonthRig so leaving/entering month never twitches
     if (this.reducedMotion) {
       this.trailOrbitAngle = this.smoothOrbitAngle;
       this.camOrbitAngle = this.smoothOrbitAngle;
     } else {
-      const chaseLambda = this.mode === "month" ? 7.5 : 14.0;
-      const maxLag = this.mode === "month" ? 0.075 : 0.025;
+      const chaseLambda = THREE.MathUtils.lerp(14.0, 7.5, this.wMonthRig);
+      const maxLag = THREE.MathUtils.lerp(0.025, 0.075, this.wMonthRig);
       const nextTrail = damp(this.trailOrbitAngle, this.smoothOrbitAngle, chaseLambda, dt);
       const rawLag = this.smoothOrbitAngle - nextTrail;
       const softLag = maxLag * Math.tanh(rawLag / maxLag);
@@ -1855,18 +2548,20 @@ export class CosmicSceneRenderer {
     this.smoothOrbitRadius = damp(this.smoothOrbitRadius, targetRadius, orbitLambda, dt);
 
     const targetEarthScale = this.mode === "month" ? CAROUSEL_EARTH_SCALE : 1;
-    this.smoothEarthScale = damp(this.smoothEarthScale, targetEarthScale, camLambda, dt);
+    this.smoothEarthScale = damp(this.smoothEarthScale, targetEarthScale, settleLambda, dt);
 
-    const moonDistFactor = this.cosmicState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM;
-    const targetMoonOrbitRadius =
-      (this.mode === "month" ? CAROUSEL_MOON_ORBIT_RADIUS : HERO_MOON_ORBIT_RADIUS) *
-      moonDistFactor;
-    this.smoothMoonOrbitRadius = damp(
-      this.smoothMoonOrbitRadius,
-      targetMoonOrbitRadius,
-      camLambda,
-      dt,
-    );
+    if (!this.flight.active && (this.mode === "idle" || this.mode === "month")) {
+      const moonDistFactor = this.cosmicState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM;
+      const targetMoonOrbitRadius =
+        (this.mode === "month" ? CAROUSEL_MOON_ORBIT_RADIUS : HERO_MOON_ORBIT_RADIUS) *
+        moonDistFactor;
+      this.smoothMoonOrbitRadius = damp(
+        this.smoothMoonOrbitRadius,
+        targetMoonOrbitRadius,
+        settleLambda,
+        dt,
+      );
+    }
 
     // 1:1 continuous sub-day lunar phase & guide interpolation during Day dragging
     const dayFraction = this.reducedMotion ? 0 : this.dragDayFraction;
@@ -2029,6 +2724,12 @@ export class CosmicSceneRenderer {
       astroLambda,
       dt,
     );
+    const dEpoch = this.smoothEpochYears - this.prevSmoothEpochYears;
+    this.prevSmoothEpochYears = this.smoothEpochYears;
+    if (this.mode === "year") {
+      this.smoothGalLonShift += dEpoch * 0.0085 + (this.reducedMotion ? 0 : dt * 0.0022);
+    }
+
     this.smoothPrecession = damp(
       this.smoothPrecession,
       this.cosmicState.galactic.axialPrecessionRad,
@@ -2036,92 +2737,36 @@ export class CosmicSceneRenderer {
       dt,
     );
 
-    const targetEarth = this.mode === "idle" || this.mode === "month" ? 1 : 0;
-    const targetOrbitalMoon = this.mode === "idle" || this.mode === "month" ? 1 : 0;
-    const targetSun = this.mode === "idle" || this.mode === "month" || this.mode === "year" ? 1 : 0;
-    const targetMoon = this.mode === "day" ? 1 : 0;
-    const targetOcean = this.mode === "day" ? 1 : 0;
-    const targetGalactic = this.mode === "year" ? 1 : 0;
-    const targetMonthGuide = this.mode === "month" ? 1 : 0;
-    const targetYearGuide = this.mode === "year" ? 1 : 0;
-    const targetDayGuide = this.mode === "day" ? 1 : 0;
-    const targetSkyBright =
-      this.mode === "year"
-        ? 1.02
-        : this.mode === "month"
-          ? 0.52
-          : this.mode === "day"
-            ? 0.24
-            : 0.48;
-    const targetSkyGamma =
-      this.mode === "year"
-        ? 0.74
-        : this.mode === "month"
-          ? 0.83
-          : this.mode === "day"
-            ? 0.88
-            : 0.84;
-    const targetSkyReveal =
-      this.mode === "year" ? 1 : this.mode === "month" ? 0.22 : this.mode === "day" ? 0.03 : 0.16;
-
-    this.wEarth = damp(this.wEarth, targetEarth, fadeLambda, dt);
-    this.wOrbitalMoon = damp(this.wOrbitalMoon, targetOrbitalMoon, fadeLambda, dt);
-    this.wSun = damp(this.wSun, targetSun, fadeLambda, dt);
-    this.wMoon = damp(this.wMoon, targetMoon, fadeLambda, dt);
-    this.wOcean = damp(this.wOcean, targetOcean, fadeLambda, dt);
-    this.wGalactic = damp(this.wGalactic, targetGalactic, fadeLambda, dt);
-    this.wMonthGuide = damp(this.wMonthGuide, targetMonthGuide, fadeLambda, dt);
-    this.wYearGuide = damp(this.wYearGuide, targetYearGuide, fadeLambda, dt);
-    this.wDayGuide = damp(this.wDayGuide, targetDayGuide, fadeLambda, dt);
-    this.smoothSkyBright = damp(this.smoothSkyBright, targetSkyBright, fadeLambda, dt);
-    this.smoothSkyGamma = damp(this.smoothSkyGamma, targetSkyGamma, fadeLambda, dt);
-    this.smoothSkyReveal = damp(this.smoothSkyReveal, targetSkyReveal, fadeLambda, dt);
-
-    const rig = this.mode === "month" ? CAROUSEL_RIG : HERO_RIG;
-    this.rigRadial = damp(this.rigRadial, rig.radial, camLambda, dt);
-    this.rigTangent = damp(this.rigTangent, rig.tangent, camLambda, dt);
-    this.rigHeight = damp(this.rigHeight, rig.height, camLambda, dt);
-    this.rigTargetWeight = damp(this.rigTargetWeight, rig.targetWeight, camLambda, dt);
-    this.rigTargetY = damp(this.rigTargetY, rig.targetY, camLambda, dt);
-    this.rigFocusFollow = damp(this.rigFocusFollow, rig.focusFollow, camLambda, dt);
-    this.earthRigBlend = damp(this.earthRigBlend, targetEarth, camLambda, dt);
-
     this.updateOrbitTransform(dt);
-    this.computeEarthRigCamera(this.polarCamPos, this.polarCamTarget);
 
-    if (this.mode === "day" || this.mode === "year") {
-      this.computeNonEarthCameraGoal(
-        this.mode,
-        this.desiredNonEarthPos,
-        this.desiredNonEarthTarget,
+    if (this.flight.active) {
+      this.stepFlight(dt);
+    } else {
+      this.computeModeCameraGoal(this.mode, this.camPos, this.camTarget);
+      const [yaw, pitch] = dirToYawPitch(
+        this.tmpDir.copy(this.camTarget).sub(this.camPos).normalize(),
       );
-      this.nonEarthCamPos.x = damp(this.nonEarthCamPos.x, this.desiredNonEarthPos.x, camLambda, dt);
-      this.nonEarthCamPos.y = damp(this.nonEarthCamPos.y, this.desiredNonEarthPos.y, camLambda, dt);
-      this.nonEarthCamPos.z = damp(this.nonEarthCamPos.z, this.desiredNonEarthPos.z, camLambda, dt);
-      this.nonEarthCamTarget.x = damp(
-        this.nonEarthCamTarget.x,
-        this.desiredNonEarthTarget.x,
-        camLambda,
-        dt,
-      );
-      this.nonEarthCamTarget.y = damp(
-        this.nonEarthCamTarget.y,
-        this.desiredNonEarthTarget.y,
-        camLambda,
-        dt,
-      );
-      this.nonEarthCamTarget.z = damp(
-        this.nonEarthCamTarget.z,
-        this.desiredNonEarthTarget.z,
-        camLambda,
-        dt,
-      );
+      this.curCamYaw = yaw;
+      this.curCamPitch = pitch;
     }
 
-    const b = THREE.MathUtils.clamp(this.earthRigBlend, 0, 1);
-    const smoothBlend = b * b * (3 - 2 * b);
-    this.camPos.lerpVectors(this.nonEarthCamPos, this.polarCamPos, smoothBlend);
-    this.camTarget.lerpVectors(this.nonEarthCamTarget, this.polarCamTarget, smoothBlend);
+    if (dt > 1e-4) {
+      this.curVelPos.copy(this.camPos).sub(this.prevCamPos).divideScalar(dt);
+      const curAz = Math.atan2(this.camPos.x, this.camPos.z);
+      const curR = Math.hypot(this.camPos.x, this.camPos.z);
+      const prevAz = Math.atan2(this.prevCamPos.x, this.prevCamPos.z);
+      const prevR = Math.hypot(this.prevCamPos.x, this.prevCamPos.z);
+      this.curVelCyl.set(
+        shortestAngleDelta(prevAz, curAz) / dt,
+        (curR - prevR) / dt,
+        (this.camPos.y - this.prevCamPos.y) / dt,
+      );
+      this.curVelYaw = shortestAngleDelta(this.prevCamYaw, this.curCamYaw) / dt;
+      this.curVelPitch = (this.curCamPitch - this.prevCamPitch) / dt;
+    }
+    this.prevCamPos.copy(this.camPos);
+    this.prevCamYaw = this.curCamYaw;
+    this.prevCamPitch = this.curCamPitch;
 
     this.applyUniforms();
     this.renderSingleFrame();
