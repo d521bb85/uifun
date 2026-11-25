@@ -3,6 +3,9 @@ import {
   addDateSegment,
   type CosmicState,
   computeCosmicState,
+  computeLunarSunDirectionObserver,
+  GALACTIC_ECLIPTIC_BASIS,
+  galacticToEclipticDirection,
   SYNODIC_MONTH_DAYS,
 } from "./astronomy";
 import {
@@ -202,6 +205,9 @@ export class CosmicSceneRenderer {
   private readonly camera: THREE.PerspectiveCamera;
 
   private readonly skyGroup: THREE.Group;
+  private readonly skyMesh: THREE.Mesh;
+  private readonly astroSkyQuat: THREE.Quaternion;
+  private readonly yearSkyQuat: THREE.Quaternion;
   private readonly skyUniforms: {
     uSkyMap: { value: THREE.Texture };
     uBrightness: { value: number };
@@ -523,9 +529,19 @@ export class CosmicSceneRenderer {
     });
     this.materials.push(skyMaterial);
     const skyMesh = new THREE.Mesh(skyGeo, skyMaterial);
-    // Place ESO galactic bulge directly across the diagonal Orion Spur plane in Year view
-    skyMesh.rotation.order = "ZYX";
-    skyMesh.rotation.set(0.04, Math.PI * 0.5, 0.33);
+    // True J2000 Galactic plane orientation for Hero/Month/Day (aligned with Hipparcos stars)
+    const galBasis = new THREE.Matrix4().makeBasis(
+      new THREE.Vector3(...GALACTIC_ECLIPTIC_BASIS.center),
+      new THREE.Vector3(...GALACTIC_ECLIPTIC_BASIS.north),
+      new THREE.Vector3(...GALACTIC_ECLIPTIC_BASIS.east).negate(),
+    );
+    this.astroSkyQuat = new THREE.Quaternion().setFromRotationMatrix(galBasis);
+    // Artistic diagonal Orion Spur framing preserved exclusively for Year view
+    this.yearSkyQuat = new THREE.Quaternion().setFromEuler(
+      new THREE.Euler(0.04, Math.PI * 0.5, 0.33, "ZYX"),
+    );
+    skyMesh.quaternion.copy(this.astroSkyQuat);
+    this.skyMesh = skyMesh;
     this.skyGroup.add(skyMesh);
 
     const {
@@ -808,23 +824,17 @@ export class CosmicSceneRenderer {
     }
 
     const rand = seededRandom(20261124);
-    const galTilt = THREE.MathUtils.degToRad(60.2);
-    const cosGal = Math.cos(galTilt);
-    const sinGal = Math.sin(galTilt);
     for (let i = 0; i < bgCount; i += 1) {
       const u = rand() * 2 - 1;
       const inBand = rand() < 0.45;
       const lat = inBand ? (rand() - 0.5 + (rand() - 0.5)) * 0.34 : Math.asin(u);
       const lon = rand() * TWO_PI;
-      const cosLat = Math.cos(lat);
 
-      const gx = radius * cosLat * Math.cos(lon);
-      const gy = radius * Math.sin(lat);
-      const gz = radius * cosLat * Math.sin(lon);
-
-      positions[idx * 3] = gx;
-      positions[idx * 3 + 1] = gy * cosGal - gz * sinGal;
-      positions[idx * 3 + 2] = gy * sinGal + gz * cosGal;
+      // Exact IAU J2000 Galactic -> Ecliptic transform so Milky Way band aligns with Hipparcos stars
+      const [ex, ey, ez] = galacticToEclipticDirection(lon, lat);
+      positions[idx * 3] = radius * ex;
+      positions[idx * 3 + 1] = radius * ey;
+      positions[idx * 3 + 2] = radius * ez;
 
       const bv = -0.15 + rand() * 1.45;
       const [r, g, b] = bvToRgb(bv);
@@ -1544,11 +1554,12 @@ export class CosmicSceneRenderer {
     const mz = -cosMoonLat * Math.sin(moonLon) * this.smoothMoonOrbitRadius;
     this.orbitalMoonGroup.position.set(mx, my, mz);
     this.orbitalMoonMesh.scale.setScalar(this.smoothEarthScale);
-    // Tidally lock lunar near-side (+X on Three.js SphereGeometry at u=0.5) toward Earth with real libration
+    // Tidally lock lunar near-side (+X on Three.js SphereGeometry at u=0.5) toward Earth
+    // with exact IAU optical libration (longitude l' and latitude b' including Cassini obliquity)
     this.orbitalMoonMesh.rotation.set(
       0,
-      moonLon + Math.PI + this.smoothDayLibLon,
-      -this.smoothMoonLat + this.smoothDayLibLat,
+      moonLon + Math.PI - this.smoothDayLibLon,
+      -(this.smoothMoonLat + this.smoothDayLibLat),
     );
     // Physically lit by the static Sun at world origin (0, 0, 0)
     this.orbitalMoonUniforms.uSunDir.value.set(-(ex + mx), -my, -(ez + mz)).normalize();
@@ -1585,13 +1596,13 @@ export class CosmicSceneRenderer {
     this.galacticGuideMesh.position.copy(this.sunGroup.position);
 
     // Northern Hemisphere lunar orientation (waxing illuminated on right +X, waning on left -X)
-    const elong = this.smoothMoonElong;
-    const moonSunX = Math.sin(elong);
-    const moonSunY = Math.sin(this.smoothDayLat) * 0.65;
-    const moonSunZ = -Math.cos(elong);
+    const [moonSunX, moonSunY, moonSunZ] = computeLunarSunDirectionObserver(
+      this.smoothMoonElong,
+      this.smoothDayLat,
+    );
     this.moonUniforms.uSunDir.value.set(moonSunX, moonSunY, moonSunZ).normalize();
     this.moonMesh.scale.setScalar(this.smoothMoonScale);
-    this.moonMesh.rotation.y = -Math.PI * 0.5 + this.smoothDayLibLon;
+    this.moonMesh.rotation.y = -Math.PI * 0.5 - this.smoothDayLibLon;
     this.moonMesh.rotation.x = this.smoothDayLibLat;
 
     const galLonShift =
@@ -1714,6 +1725,7 @@ export class CosmicSceneRenderer {
     this.galacticGuideUniforms.uDrift.value = this.galacticDustUniforms.uDrift.value;
     this.galacticGuideMesh.visible = this.wYearGuide > 0.005;
 
+    this.skyMesh.quaternion.slerpQuaternions(this.astroSkyQuat, this.yearSkyQuat, this.wGalactic);
     this.skyUniforms.uBrightness.value = this.smoothSkyBright;
     this.skyUniforms.uGamma.value = this.smoothSkyGamma;
     this.skyUniforms.uGalacticReveal.value = this.smoothSkyReveal;

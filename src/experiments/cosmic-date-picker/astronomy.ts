@@ -80,7 +80,9 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 export function daysInMonth(year: number, month: number): number {
-  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const date = new Date(0);
+  date.setUTCFullYear(year, month, 0);
+  return date.getUTCDate();
 }
 
 export function formatIsoDate(year: number, month: number, day: number): string {
@@ -304,11 +306,21 @@ export function computeLunarState(jd: number, solar: SolarState): LunarState {
   const waxing = elongDeg < 180;
   const apparentScale = MEAN_LUNAR_DISTANCE_KM / distanceKm;
 
-  let libLonDeg = lp - lonDeg;
+  // IAU optical libration: positive l' reveals more of the lunar East limb (Mare Crisium),
+  // positive b' reveals more of the lunar North pole (including Cassini's 1.54242° axial obliquity).
+  let libLonDeg = lonDeg - lp;
   if (libLonDeg > 180) libLonDeg -= 360;
   if (libLonDeg < -180) libLonDeg += 360;
   const librationLonRad = clamp(libLonDeg, -8, 8) * DEG2RAD;
-  const librationLatRad = clamp(-latDeg, -7, 7) * DEG2RAD;
+  const lunarAxisTiltRad = 1.54242 * DEG2RAD;
+  const wRad = (f + libLonDeg) * DEG2RAD;
+  const sinLibLat = clamp(
+    -Math.sin(wRad) * Math.cos(latRad) * Math.sin(lunarAxisTiltRad) -
+      Math.sin(latRad) * Math.cos(lunarAxisTiltRad),
+    -1,
+    1,
+  );
+  const librationLatRad = clamp(Math.asin(sinLibLat), -7 * DEG2RAD, 7 * DEG2RAD);
   const earthshine = (1 - illumination) ** 1.35;
 
   return {
@@ -346,7 +358,19 @@ export function computeTidalState(jd: number, solar: SolarState, lunar: LunarSta
   const semiDiurnalPhaseRad = (((daysSinceJ2000 / m2PeriodDays) % 1) + 1) % 1;
   const m2Angle = semiDiurnalPhaseRad * Math.PI * 2;
 
-  const diurnalMod = 0.14 * Math.sin(solar.sunDeclinationRad) * Math.sin(lunar.latitudeRad * 2);
+  // Diurnal tidal inequality driven by lunar and solar equatorial declinations
+  const sinLunarDec = clamp(
+    Math.sin(lunar.latitudeRad) * Math.cos(solar.obliquityRad) +
+      Math.cos(lunar.latitudeRad) * Math.sin(solar.obliquityRad) * Math.sin(lunar.longitudeRad),
+    -1,
+    1,
+  );
+  const lunarDeclinationRad = Math.asin(sinLunarDec);
+  const diurnalMod =
+    0.14 *
+    ((lunarPotential * Math.sin(2 * lunarDeclinationRad) +
+      solarPotential * Math.sin(2 * solar.sunDeclinationRad)) /
+      (lunarPotential + solarPotential));
   const rawWave = Math.cos(m2Angle) + diurnalMod;
   const envelope = 0.32 + 0.68 * springNeapIndex;
   const waterLevel = clamp(rawWave * envelope, -1, 1);
@@ -448,4 +472,86 @@ export function geographicToEclipticNormal(
   const zEcl = -yEq * sinE + zEq * cosE;
 
   return [xEcl, yEcl, zEcl];
+}
+
+/**
+ * Computes the unit Sun direction on the Moon in the Northern-Hemisphere observer
+ * frame (+X = right / celestial West, +Y = ecliptic North, +Z = toward observer).
+ */
+export function computeLunarSunDirectionObserver(
+  elongationRad: number,
+  latitudeRad: number,
+): [number, number, number] {
+  const cosElong = Math.cos(elongationRad);
+  return [
+    Math.sin(elongationRad),
+    -Math.sin(latitudeRad) * cosElong,
+    -Math.cos(latitudeRad) * cosElong,
+  ];
+}
+
+const J2000_OBLIQUITY_RAD = 23.43929111 * DEG2RAD;
+
+function equatorialJ2000ToEcliptic(raDeg: number, decDeg: number): [number, number, number] {
+  const ra = raDeg * DEG2RAD;
+  const dec = decDeg * DEG2RAD;
+  const cosDec = Math.cos(dec);
+  const xEq = cosDec * Math.cos(ra);
+  const yEq = Math.sin(dec);
+  const zEq = -cosDec * Math.sin(ra);
+
+  const cosE = Math.cos(J2000_OBLIQUITY_RAD);
+  const sinE = Math.sin(J2000_OBLIQUITY_RAD);
+  return [xEq, yEq * cosE + zEq * sinE, -yEq * sinE + zEq * cosE];
+}
+
+function normalize3(v: readonly [number, number, number]): [number, number, number] {
+  const len = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / len, v[1] / len, v[2] / len];
+}
+
+function cross3(
+  a: readonly [number, number, number],
+  b: readonly [number, number, number],
+): [number, number, number] {
+  return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+}
+
+// Exact IAU J2000 Galactic orthonormal basis in right-handed ecliptic world coordinates:
+// - north: North Galactic Pole (RA 192.85948°, Dec +27.12825°)
+// - center: Galactic Center l=0°, b=0° (RA 266.405°, Dec -28.93617°, orthogonalized to NGP)
+// - east: Galactic rotation direction l=90°, b=0° (Cygnus)
+const GAL_NORTH = normalize3(equatorialJ2000ToEcliptic(192.85948, 27.12825));
+const RAW_GAL_CENTER = equatorialJ2000ToEcliptic(266.405, -28.93617);
+const GC_DOT_NGP =
+  RAW_GAL_CENTER[0] * GAL_NORTH[0] +
+  RAW_GAL_CENTER[1] * GAL_NORTH[1] +
+  RAW_GAL_CENTER[2] * GAL_NORTH[2];
+const GAL_CENTER = normalize3([
+  RAW_GAL_CENTER[0] - GC_DOT_NGP * GAL_NORTH[0],
+  RAW_GAL_CENTER[1] - GC_DOT_NGP * GAL_NORTH[1],
+  RAW_GAL_CENTER[2] - GC_DOT_NGP * GAL_NORTH[2],
+]);
+const GAL_EAST = normalize3(cross3(GAL_NORTH, GAL_CENTER));
+
+export const GALACTIC_ECLIPTIC_BASIS = {
+  center: GAL_CENTER,
+  east: GAL_EAST,
+  north: GAL_NORTH,
+} as const;
+
+/**
+ * Transforms J2000 Galactic coordinates (longitude l, latitude b in radians)
+ * into a unit vector in right-handed ecliptic world coordinates.
+ */
+export function galacticToEclipticDirection(lRad: number, bRad: number): [number, number, number] {
+  const cosB = Math.cos(bRad);
+  const sinB = Math.sin(bRad);
+  const c = cosB * Math.cos(lRad);
+  const e = cosB * Math.sin(lRad);
+  return [
+    c * GAL_CENTER[0] + e * GAL_EAST[0] + sinB * GAL_NORTH[0],
+    c * GAL_CENTER[1] + e * GAL_EAST[1] + sinB * GAL_NORTH[1],
+    c * GAL_CENTER[2] + e * GAL_EAST[2] + sinB * GAL_NORTH[2],
+  ];
 }

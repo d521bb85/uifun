@@ -122,7 +122,6 @@ export const BRIGHT_STARS: readonly StarEntry[] = [
   { raHours: 10.7159, decDeg: -64.3944, mag: 2.74, bv: -0.22 },
   { raHours: 9.285, decDeg: -59.2752, mag: 2.21, bv: 0.18 },
   { raHours: 10.8975, decDeg: -58.8533, mag: 2.69, bv: 1.66 },
-  { raHours: 8.7867, decDeg: -54.7088, mag: 1.96, bv: 0.04 },
   { raHours: 9.1333, decDeg: -43.4326, mag: 2.23, bv: 1.66 },
   { raHours: 18.4664, decDeg: -25.4217, mag: 2.82, bv: 1.04 },
   { raHours: 19.0436, decDeg: -29.8801, mag: 2.6, bv: 0.08 },
@@ -146,8 +145,8 @@ export function bvToRgb(bv: number): [number, number, number] {
   let b = 1;
 
   if (t < 0.0) {
-    r = 0.62 + 0.38 * ((t + 0.4) / 0.4);
-    g = 0.76 + 0.24 * ((t + 0.4) / 0.4);
+    r = 0.62 + 0.26 * ((t + 0.4) / 0.4);
+    g = 0.76 + 0.16 * ((t + 0.4) / 0.4);
     b = 1.0;
   } else if (t < 0.4) {
     r = 0.88 + 0.12 * (t / 0.4);

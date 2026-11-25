@@ -1,14 +1,19 @@
+import * as THREE from "three";
 import { describe, expect, it } from "vitest";
 import {
   addDateSegment,
   computeCosmicState,
   computeLunarDirectionEcliptic,
+  computeLunarSunDirectionObserver,
   computeSunDirectionEcliptic,
+  daysInMonth,
   formatIsoDate,
+  galacticToEclipticDirection,
   geographicToEclipticNormal,
   parseIsoDate,
   toJulianDay,
 } from "./astronomy";
+import { BRIGHT_STARS, bvToRgb } from "./starCatalog";
 
 const RAD2DEG = 180 / Math.PI;
 const DEG2RAD = Math.PI / 180;
@@ -177,5 +182,139 @@ describe("cosmic astronomy engine", () => {
     expect(newMoonDot).toBeGreaterThan(0.95);
     expect(Math.abs(quarterDot)).toBeLessThan(0.18);
     expect(fullMoonDot).toBeLessThan(-0.95);
+  });
+
+  it("computes IAU optical lunar libration and matches 3D orbital & day sub-Earth coordinates", () => {
+    // 2026-11-24: Moon is ~5° north of ecliptic -> Earth sees ~6.5° south (including Cassini 1.54° tilt)
+    // 2026-11-09: Moon is ~5° south of ecliptic -> Earth sees ~6.5° north
+    for (const iso of ["2026-11-09", "2026-11-17", "2026-11-24"]) {
+      const { lunar } = computeCosmicState(iso);
+      const moonPos = new THREE.Vector3(...computeLunarDirectionEcliptic(lunar));
+      const dirToEarth = moonPos.clone().negate().normalize();
+
+      // 3D Orbital Moon transform (matching CosmicScene.ts)
+      const orbMesh = new THREE.Mesh();
+      orbMesh.rotation.order = "YXZ";
+      orbMesh.rotation.set(
+        0,
+        lunar.longitudeRad + Math.PI - lunar.librationLonRad,
+        -(lunar.latitudeRad + lunar.librationLatRad),
+      );
+      orbMesh.updateMatrixWorld(true);
+      const earthInOrb = dirToEarth.clone().applyQuaternion(orbMesh.quaternion.clone().invert());
+      const orbSubLat = Math.asin(Math.max(-1, Math.min(1, earthInOrb.y)));
+      const orbSubLon = Math.atan2(-earthInOrb.z, earthInOrb.x);
+
+      // Day Mode Moon transform (matching CosmicScene.ts, observer along +Z)
+      const dayMesh = new THREE.Mesh();
+      dayMesh.rotation.set(lunar.librationLatRad, -Math.PI * 0.5 - lunar.librationLonRad, 0);
+      dayMesh.updateMatrixWorld(true);
+      const obsInDay = new THREE.Vector3(0, 0, 1).applyQuaternion(
+        dayMesh.quaternion.clone().invert(),
+      );
+      const daySubLat = Math.asin(Math.max(-1, Math.min(1, obsInDay.y)));
+      const daySubLon = Math.atan2(-obsInDay.z, obsInDay.x);
+
+      expect(orbSubLat * RAD2DEG).toBeCloseTo(lunar.librationLatRad * RAD2DEG, 1);
+      expect(orbSubLon * RAD2DEG).toBeCloseTo(lunar.librationLonRad * RAD2DEG, 1);
+      expect(daySubLat * RAD2DEG).toBeCloseTo(lunar.librationLatRad * RAD2DEG, 2);
+      expect(daySubLon * RAD2DEG).toBeCloseTo(lunar.librationLonRad * RAD2DEG, 2);
+    }
+
+    const northMoon = computeCosmicState("2026-11-24").lunar;
+    const southMoon = computeCosmicState("2026-11-09").lunar;
+    expect(northMoon.latitudeRad * RAD2DEG).toBeGreaterThan(4.5);
+    expect(northMoon.librationLatRad * RAD2DEG).toBeLessThan(-6.0);
+    expect(southMoon.latitudeRad * RAD2DEG).toBeLessThan(-4.5);
+    expect(southMoon.librationLatRad * RAD2DEG).toBeGreaterThan(6.0);
+  });
+
+  it("projects the Day-mode lunar Sun vector accurately across elongation and ecliptic latitude", () => {
+    const beta = 5 * DEG2RAD;
+    const newMoon = computeLunarSunDirectionObserver(0, beta);
+    const firstQ = computeLunarSunDirectionObserver(Math.PI / 2, beta);
+    const fullMoon = computeLunarSunDirectionObserver(Math.PI, beta);
+    const lastQ = computeLunarSunDirectionObserver((3 * Math.PI) / 2, beta);
+
+    // Always unit length
+    for (const v of [newMoon, firstQ, fullMoon, lastQ]) {
+      expect(Math.hypot(v[0], v[1], v[2])).toBeCloseTo(1, 6);
+    }
+
+    // Moon 5° north of Sun at New Moon -> Sun sits below (-Y) behind the Moon (-Z)
+    expect(newMoon[0]).toBeCloseTo(0, 6);
+    expect(newMoon[1]).toBeCloseTo(-Math.sin(beta), 6);
+    expect(newMoon[2]).toBeCloseTo(-Math.cos(beta), 6);
+
+    // At Quarters, Sun lies purely right (+X, waxing) or left (-X, waning) with zero vertical tilt
+    expect(firstQ[0]).toBeCloseTo(1, 6);
+    expect(Math.abs(firstQ[1])).toBeLessThan(1e-6);
+    expect(lastQ[0]).toBeCloseTo(-1, 6);
+    expect(Math.abs(lastQ[1])).toBeLessThan(1e-6);
+
+    // Moon 5° north of antisolar point at Full Moon -> Sun illuminates slightly from +Y
+    expect(fullMoon[1]).toBeCloseTo(Math.sin(beta), 6);
+    expect(fullMoon[2]).toBeCloseTo(Math.cos(beta), 6);
+  });
+
+  it("aligns the Galactic-to-ecliptic transform with real J2000 Galactic landmarks", () => {
+    const j2000Obl = 23.43929111 * DEG2RAD;
+    const eqToEcl = (raDeg: number, decDeg: number): [number, number, number] => {
+      const ra = raDeg * DEG2RAD;
+      const dec = decDeg * DEG2RAD;
+      const xEq = Math.cos(dec) * Math.cos(ra);
+      const yEq = Math.sin(dec);
+      const zEq = -Math.cos(dec) * Math.sin(ra);
+      return [
+        xEq,
+        yEq * Math.cos(j2000Obl) + zEq * Math.sin(j2000Obl),
+        -yEq * Math.sin(j2000Obl) + zEq * Math.cos(j2000Obl),
+      ];
+    };
+
+    // Galactic Center (Sgr A*), North Galactic Pole, Cygnus (l=90°), Anticenter (l=180°)
+    expect(dot3(galacticToEclipticDirection(0, 0), eqToEcl(266.405, -28.936))).toBeGreaterThan(
+      0.9999,
+    );
+    expect(
+      dot3(galacticToEclipticDirection(0, Math.PI / 2), eqToEcl(192.8595, 27.1283)),
+    ).toBeGreaterThan(0.9999);
+    expect(
+      dot3(galacticToEclipticDirection(Math.PI / 2, 0), eqToEcl(318.004, 48.33)),
+    ).toBeGreaterThan(0.9999);
+    expect(dot3(galacticToEclipticDirection(Math.PI, 0), eqToEcl(86.405, 28.936))).toBeGreaterThan(
+      0.9999,
+    );
+  });
+
+  it("keeps bright star catalog free of duplicates and B-V color mapping continuous", () => {
+    for (let i = 0; i < BRIGHT_STARS.length; i += 1) {
+      for (let j = i + 1; j < BRIGHT_STARS.length; j += 1) {
+        const a = BRIGHT_STARS[i];
+        const b = BRIGHT_STARS[j];
+        if (!a || !b) continue;
+        const ra1 = a.raHours * 15 * DEG2RAD;
+        const dec1 = a.decDeg * DEG2RAD;
+        const ra2 = b.raHours * 15 * DEG2RAD;
+        const dec2 = b.decDeg * DEG2RAD;
+        const cosSep =
+          Math.sin(dec1) * Math.sin(dec2) + Math.cos(dec1) * Math.cos(dec2) * Math.cos(ra1 - ra2);
+        const sepDeg = Math.acos(Math.max(-1, Math.min(1, cosSep))) * RAD2DEG;
+        expect(sepDeg).toBeGreaterThan(0.5);
+      }
+    }
+
+    const neg = bvToRgb(-0.0001);
+    const pos = bvToRgb(0.0001);
+    expect(Math.abs(neg[0] - pos[0])).toBeLessThan(0.002);
+    expect(Math.abs(neg[1] - pos[1])).toBeLessThan(0.002);
+    expect(Math.abs(neg[2] - pos[2])).toBeLessThan(0.002);
+  });
+
+  it("handles proleptic Gregorian daysInMonth accurately for low and century years", () => {
+    expect(daysInMonth(1, 2)).toBe(28);
+    expect(daysInMonth(4, 2)).toBe(29);
+    expect(daysInMonth(100, 2)).toBe(28);
+    expect(daysInMonth(400, 2)).toBe(29);
   });
 });
