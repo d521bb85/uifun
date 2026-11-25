@@ -60,6 +60,10 @@ const DAY_GUIDE_DAY_SPACING = 0.215;
 const TIDE_DRIFT_SPEED = 0.16;
 const TIDE_DRIFT_ACCEL = 0.7;
 const TIDE_ARRIVAL_BAND = 0.035;
+// Constant-speed lunar orbital catch-up relative to Earth (co-orbiting the Sun with Earth)
+const MOON_ORBIT_DRIFT_SPEED = 0.72;
+const MOON_ORBIT_DRIFT_ACCEL = 2.4;
+const MOON_ORBIT_ARRIVAL_BAND = 0.24;
 
 // Hero (idle) framing: Earth fills the left corner (~1/3 of the card) with static Sun upper-right
 // and the Moon orbiting honestly across its true 360° geocentric ecliptic path.
@@ -129,6 +133,42 @@ function shortestAngleDelta(from: number, to: number): number {
   let diff = ((to - from + Math.PI) % TWO_PI) - Math.PI;
   if (diff < -Math.PI) diff += TWO_PI;
   return diff;
+}
+
+function advanceSmoothAngleLinear(
+  current: number,
+  target: number,
+  velocity: number,
+  maxSpeed: number,
+  accel: number,
+  arrivalBand: number,
+  dt: number,
+): [number, number] {
+  const diff = shortestAngleDelta(current, target);
+  if (Math.abs(diff) < 1e-4 && Math.abs(velocity) < 1e-3) {
+    return [shortestAngleDelta(0, target), 0];
+  }
+
+  // Cruise at a steady constant angular speed outside a soft-landing band near target
+  const speedScale = Math.min(1, Math.abs(diff) / arrivalBand);
+  const desiredVelocity = Math.sign(diff) * maxSpeed * speedScale;
+
+  // Ramp velocity smoothly so starts, stops, and direction reversals have zero jerk
+  const maxVelStep = accel * dt;
+  const velDiff = desiredVelocity - velocity;
+  const nextVelocity =
+    Math.abs(velDiff) <= maxVelStep ? desiredVelocity : velocity + Math.sign(velDiff) * maxVelStep;
+
+  const step = nextVelocity * dt;
+  if ((diff > 0 && step >= diff) || (diff < 0 && step <= diff)) {
+    return [shortestAngleDelta(0, target), 0];
+  }
+
+  return [shortestAngleDelta(0, current + step), nextVelocity];
+}
+
+function computeMoonRelAngle(state: CosmicState): number {
+  return shortestAngleDelta(state.solar.earthHeliocentricLongitudeRad, state.lunar.longitudeRad);
 }
 
 function shortestCycleDelta(from: number, to: number, period: number): number {
@@ -314,8 +354,8 @@ export class CosmicSceneRenderer {
   private prevSpinDelta = -(TWO_PI + TWO_PI / 12);
   private nextOrbitRadius = EARTH_ORBIT_RADIUS;
   private prevOrbitRadius = EARTH_ORBIT_RADIUS;
-  private nextMoonLonDelta = TWO_PI;
-  private prevMoonLonDelta = -TWO_PI;
+  private nextMoonRelDelta = 0;
+  private prevMoonRelDelta = 0;
   private nextMoonLat = 0;
   private prevMoonLat = 0;
 
@@ -347,8 +387,8 @@ export class CosmicSceneRenderer {
   private smoothOrbitRadius: number;
   private targetSpinAngle: number;
   private smoothSpinAngle: number;
-  private targetMoonLon: number;
-  private smoothMoonLon: number;
+  private smoothMoonRelAngle: number;
+  private moonRelVelocity = 0;
   private smoothMoonLat: number;
   private smoothMoonOrbitRadius: number;
   private smoothEarthScale = 1;
@@ -404,8 +444,7 @@ export class CosmicSceneRenderer {
     this.smoothOrbitRadius = EARTH_ORBIT_RADIUS * initialState.solar.earthSunDistanceAU;
     this.targetSpinAngle = initialState.solar.gmstRad;
     this.smoothSpinAngle = initialState.solar.gmstRad;
-    this.targetMoonLon = initialState.lunar.longitudeRad;
-    this.smoothMoonLon = initialState.lunar.longitudeRad;
+    this.smoothMoonRelAngle = computeMoonRelAngle(initialState);
     this.smoothMoonLat = initialState.lunar.latitudeRad;
     this.smoothMoonOrbitRadius =
       HERO_MOON_ORBIT_RADIUS * (initialState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM);
@@ -1186,11 +1225,11 @@ export class CosmicSceneRenderer {
     this.nextOrbitRadius = EARTH_ORBIT_RADIUS * nextState.solar.earthSunDistanceAU;
     this.prevOrbitRadius = EARTH_ORBIT_RADIUS * prevState.solar.earthSunDistanceAU;
 
-    // A calendar month (28-31d) is always slightly longer than one sidereal lunar orbit (27.32d)
-    this.nextMoonLonDelta =
-      positiveAngleDelta(cur.lunar.longitudeRad, nextState.lunar.longitudeRad) + TWO_PI;
-    this.prevMoonLonDelta =
-      negativeAngleDelta(cur.lunar.longitudeRad, prevState.lunar.longitudeRad) - TWO_PI;
+    const curMoonRel = computeMoonRelAngle(cur);
+    const nextMoonRel = computeMoonRelAngle(nextState);
+    const prevMoonRel = computeMoonRelAngle(prevState);
+    this.nextMoonRelDelta = shortestAngleDelta(curMoonRel, nextMoonRel);
+    this.prevMoonRelDelta = shortestAngleDelta(curMoonRel, prevMoonRel);
     this.nextMoonLat = nextState.lunar.latitudeRad;
     this.prevMoonLat = prevState.lunar.latitudeRad;
   }
@@ -1261,12 +1300,10 @@ export class CosmicSceneRenderer {
       // Exact step forward +1 month: matches dragMonthFraction = +1.0 with zero discontinuity
       this.targetOrbitAngle += this.nextOrbitDelta;
       this.targetSpinAngle += this.nextSpinDelta;
-      this.targetMoonLon += this.nextMoonLonDelta;
     } else if (next.isoDate === this.prevMonthIso) {
       // Exact step backward -1 month: matches dragMonthFraction = -1.0 with zero discontinuity
       this.targetOrbitAngle += this.prevOrbitDelta;
       this.targetSpinAngle += this.prevSpinDelta;
-      this.targetMoonLon += this.prevMoonLonDelta;
     } else {
       // Handle same-year circular month wraps (Dec -> Jan or Jan -> Dec) or multi-month jumps
       let effectiveDeltaDays = rawDeltaDays;
@@ -1285,19 +1322,12 @@ export class CosmicSceneRenderer {
           const dir = Math.sign(effectiveDeltaDays);
           const extraTurns = Math.round(Math.abs(effectiveDeltaDays) / 30.4375);
           this.targetSpinAngle = alignedGmst + dir * extraTurns * TWO_PI;
-
-          const approxMoonDelta = (effectiveDeltaDays / 27.32166) * TWO_PI;
-          this.targetMoonLon = unwrapAngleNear(
-            next.lunar.longitudeRad,
-            this.targetMoonLon + approxMoonDelta,
-          );
         } else {
           this.targetOrbitAngle = unwrapAngleNear(
             next.solar.earthHeliocentricLongitudeRad,
             this.smoothOrbitAngle,
           );
           this.targetSpinAngle = unwrapAngleNear(next.solar.gmstRad, this.smoothSpinAngle);
-          this.targetMoonLon = unwrapAngleNear(next.lunar.longitudeRad, this.smoothMoonLon);
         }
       }
     }
@@ -1407,8 +1437,8 @@ export class CosmicSceneRenderer {
     this.smoothOrbitRadius = EARTH_ORBIT_RADIUS * this.cosmicState.solar.earthSunDistanceAU;
     this.targetSpinAngle = this.cosmicState.solar.gmstRad;
     this.smoothSpinAngle = this.targetSpinAngle;
-    this.targetMoonLon = this.cosmicState.lunar.longitudeRad;
-    this.smoothMoonLon = this.targetMoonLon;
+    this.smoothMoonRelAngle = computeMoonRelAngle(this.cosmicState);
+    this.moonRelVelocity = 0;
     this.smoothMoonLat = this.cosmicState.lunar.latitudeRad;
     this.smoothEarthScale = this.mode === "month" ? CAROUSEL_EARTH_SCALE : 1;
     const moonDistFactor = this.cosmicState.lunar.distanceKm / MEAN_LUNAR_DISTANCE_KM;
@@ -1505,18 +1535,20 @@ export class CosmicSceneRenderer {
     // Exact heliocentric Sun direction from Earth's position toward static Sun at origin
     this.tmpSunDir.set(-ex, 0, -ez).normalize();
 
-    // Honest 360° geocentric Moon position in right-handed ecliptic coordinates
+    // Honest 360° geocentric Moon position in right-handed ecliptic coordinates,
+    // co-orbiting the Sun with Earth while smoothly catching up to its relative orbital angle
+    const moonLon = this.smoothOrbitAngle + this.smoothMoonRelAngle;
     const cosMoonLat = Math.cos(this.smoothMoonLat);
-    const mx = cosMoonLat * Math.cos(this.smoothMoonLon) * this.smoothMoonOrbitRadius;
+    const mx = cosMoonLat * Math.cos(moonLon) * this.smoothMoonOrbitRadius;
     const my = Math.sin(this.smoothMoonLat) * this.smoothMoonOrbitRadius;
-    const mz = -cosMoonLat * Math.sin(this.smoothMoonLon) * this.smoothMoonOrbitRadius;
+    const mz = -cosMoonLat * Math.sin(moonLon) * this.smoothMoonOrbitRadius;
     this.orbitalMoonGroup.position.set(mx, my, mz);
     this.orbitalMoonMesh.scale.setScalar(this.smoothEarthScale);
     // Tidally lock lunar near-side (+X on Three.js SphereGeometry at u=0.5) toward Earth with real libration
     this.orbitalMoonMesh.rotation.set(
       0,
-      this.smoothMoonLon + Math.PI + this.cosmicState.lunar.librationLonRad,
-      -this.smoothMoonLat + this.cosmicState.lunar.librationLatRad,
+      moonLon + Math.PI + this.smoothDayLibLon,
+      -this.smoothMoonLat + this.smoothDayLibLat,
     );
     // Physically lit by the static Sun at world origin (0, 0, 0)
     this.orbitalMoonUniforms.uSunDir.value.set(-(ex + mx), -my, -(ez + mz)).normalize();
@@ -1634,7 +1666,12 @@ export class CosmicSceneRenderer {
     this.atmosphereUniforms.uOpacity.value = this.wEarth;
     this.earthOrbitRoot.visible = this.wEarth > 0.005 || this.wOrbitalMoon > 0.005;
 
-    this.orbitalMoonUniforms.uEarthshine.value = this.cosmicState.lunar.earthshine;
+    const orbitalIllum = THREE.MathUtils.clamp(
+      (1 + Math.cos(this.smoothMoonLat) * Math.cos(this.smoothMoonRelAngle)) * 0.5,
+      0,
+      1,
+    );
+    this.orbitalMoonUniforms.uEarthshine.value = (1 - orbitalIllum) ** 1.35;
     this.orbitalMoonUniforms.uOpacity.value = this.wOrbitalMoon;
     this.orbitalMoonGroup.visible = this.wOrbitalMoon > 0.005;
 
@@ -1720,13 +1757,8 @@ export class CosmicSceneRenderer {
       dragFraction >= 0 ? dragFraction * this.nextOrbitDelta : -dragFraction * this.prevOrbitDelta;
     const spinOffset =
       dragFraction >= 0 ? dragFraction * this.nextSpinDelta : -dragFraction * this.prevSpinDelta;
-    const moonLonOffset =
-      dragFraction >= 0
-        ? dragFraction * this.nextMoonLonDelta
-        : -dragFraction * this.prevMoonLonDelta;
     const effectiveOrbitTarget = this.targetOrbitAngle + orbitOffset;
     const effectiveSpinTarget = this.targetSpinAngle + spinOffset;
-    const effectiveMoonLonTarget = this.targetMoonLon + moonLonOffset;
 
     this.smoothOrbitAngle = damp(this.smoothOrbitAngle, effectiveOrbitTarget, orbitLambda, dt);
 
@@ -1746,15 +1778,39 @@ export class CosmicSceneRenderer {
       this.camOrbitAngle = this.smoothOrbitAngle + softLag;
     }
 
-    // Keep Earth's axial spin and Moon's geocentric orbit locked to the same damper as Earth's orbit
+    // Keep Earth's axial spin locked to the same damper as Earth's orbit
     this.smoothSpinAngle = damp(this.smoothSpinAngle, effectiveSpinTarget, orbitLambda, dt);
-    this.smoothMoonLon = damp(this.smoothMoonLon, effectiveMoonLonTarget, orbitLambda, dt);
+
+    // Steady, velocity-ramped lunar catch-up relative to Earth while co-orbiting the Sun with Earth
+    const baseMoonRel = computeMoonRelAngle(this.cosmicState);
+    const moonRelOffset =
+      dragFraction >= 0
+        ? dragFraction * this.nextMoonRelDelta
+        : -dragFraction * this.prevMoonRelDelta;
+    const targetMoonRelAngle = shortestAngleDelta(0, baseMoonRel + moonRelOffset);
+
+    if (this.reducedMotion) {
+      this.smoothMoonRelAngle = targetMoonRelAngle;
+      this.moonRelVelocity = 0;
+    } else {
+      const [nextMoonRel, nextMoonRelVel] = advanceSmoothAngleLinear(
+        this.smoothMoonRelAngle,
+        targetMoonRelAngle,
+        this.moonRelVelocity,
+        MOON_ORBIT_DRIFT_SPEED,
+        MOON_ORBIT_DRIFT_ACCEL,
+        MOON_ORBIT_ARRIVAL_BAND,
+        dt,
+      );
+      this.smoothMoonRelAngle = nextMoonRel;
+      this.moonRelVelocity = nextMoonRelVel;
+    }
 
     const targetMoonLat =
       dragFraction >= 0
         ? THREE.MathUtils.lerp(this.cosmicState.lunar.latitudeRad, this.nextMoonLat, dragFraction)
         : THREE.MathUtils.lerp(this.cosmicState.lunar.latitudeRad, this.prevMoonLat, -dragFraction);
-    this.smoothMoonLat = damp(this.smoothMoonLat, targetMoonLat, orbitLambda, dt);
+    this.smoothMoonLat = damp(this.smoothMoonLat, targetMoonLat, this.reducedMotion ? 60 : 3.2, dt);
 
     // Keep continuous unwrapped angles bounded once settled to preserve float precision
     if (!this.monthDragging && this.dragMonthFraction === 0) {
@@ -1776,14 +1832,6 @@ export class CosmicSceneRenderer {
         const shift = Math.round(this.smoothSpinAngle / TWO_PI) * TWO_PI;
         this.targetSpinAngle -= shift;
         this.smoothSpinAngle -= shift;
-      }
-      if (
-        Math.abs(this.targetMoonLon - this.smoothMoonLon) < 0.0005 &&
-        Math.abs(this.smoothMoonLon) > Math.PI * 8
-      ) {
-        const shift = Math.round(this.smoothMoonLon / TWO_PI) * TWO_PI;
-        this.targetMoonLon -= shift;
-        this.smoothMoonLon -= shift;
       }
     }
 
