@@ -56,8 +56,10 @@ const DAY_CAM_LOCAL_TARGET = new THREE.Vector3(0.0, 1.18, -4.0);
 const DAY_MOON_DIR = DAY_MOON_POS.clone().sub(DAY_CAM_LOCAL_POS).normalize();
 const DAY_GUIDE_HALF_SPAN = 4.2;
 const DAY_GUIDE_DAY_SPACING = 0.215;
-const TIDE_DEBOUNCE_SEC = 0.4;
-const TIDE_RELEASE_SETTLE_SEC = 0.12;
+// Constant-speed coastal tidal drift: gentle ramp-up/down with steady cruise velocity
+const TIDE_DRIFT_SPEED = 0.16;
+const TIDE_DRIFT_ACCEL = 0.7;
+const TIDE_ARRIVAL_BAND = 0.035;
 
 // Hero (idle) framing: Earth fills the left corner (~1/3 of the card) with static Sun upper-right
 // and the Moon orbiting honestly across its true 360° geocentric ecliptic path.
@@ -83,6 +85,38 @@ const CAROUSEL_RIG = {
 
 function damp(current: number, target: number, lambda: number, dt: number): number {
   return THREE.MathUtils.lerp(current, target, 1 - Math.exp(-lambda * dt));
+}
+
+function advanceSmoothLinear(
+  current: number,
+  target: number,
+  velocity: number,
+  maxSpeed: number,
+  accel: number,
+  arrivalBand: number,
+  dt: number,
+): [number, number] {
+  const diff = target - current;
+  if (Math.abs(diff) < 1e-4 && Math.abs(velocity) < 1e-3) {
+    return [target, 0];
+  }
+
+  // Cruise at a steady constant speed outside a tiny soft-landing band near target
+  const speedScale = Math.min(1, Math.abs(diff) / arrivalBand);
+  const desiredVelocity = Math.sign(diff) * maxSpeed * speedScale;
+
+  // Ramp velocity smoothly so starts, stops, and direction reversals have zero jerk
+  const maxVelStep = accel * dt;
+  const velDiff = desiredVelocity - velocity;
+  const nextVelocity =
+    Math.abs(velDiff) <= maxVelStep ? desiredVelocity : velocity + Math.sign(velDiff) * maxVelStep;
+
+  const nextPos = current + nextVelocity * dt;
+  if ((diff > 0 && nextPos >= target) || (diff < 0 && nextPos <= target)) {
+    return [target, 0];
+  }
+
+  return [nextPos, nextVelocity];
 }
 
 function unwrapAngleNear(angle: number, reference: number): number {
@@ -305,6 +339,10 @@ export class CosmicSceneRenderer {
   private prevDayLibLon = 0;
   private nextDayLibLat = 0;
   private prevDayLibLat = 0;
+  private nextDayTide = 0.5;
+  private prevDayTide = 0.5;
+  private nextDaySwell = 0.5;
+  private prevDaySwell = 0.5;
 
   private smoothOrbitRadius: number;
   private targetSpinAngle: number;
@@ -326,15 +364,12 @@ export class CosmicSceneRenderer {
   private smoothMoonEarthshine: number;
   private smoothMoonScale: number;
 
-  // Debounced, slowly damped coastal tidal state (spring/neap + perigean/apogean)
-  private pendingTideLevel: number;
-  private pendingSwellEnergy: number;
-  private committedTideLevel: number;
-  private committedSwellEnergy: number;
-  private tideDebounceRemaining = 0;
+  // Constant-speed, velocity-ramped coastal tidal state (spring/neap + perigean/apogean)
   private smoothTideLevel: number;
+  private tideVelocity = 0;
   private smoothWetTideMemory: number;
   private smoothSwellEnergy: number;
+  private swellVelocity = 0;
 
   private smoothEpochYears: number;
   private smoothPrecession: number;
@@ -386,10 +421,6 @@ export class CosmicSceneRenderer {
     this.smoothMoonEarthshine = initialState.lunar.earthshine;
     this.smoothMoonScale = initialState.lunar.apparentScale;
 
-    this.pendingTideLevel = initialState.tidal.springNeapIndex;
-    this.pendingSwellEnergy = initialState.tidal.swellEnergy;
-    this.committedTideLevel = initialState.tidal.springNeapIndex;
-    this.committedSwellEnergy = initialState.tidal.swellEnergy;
     this.smoothTideLevel = initialState.tidal.springNeapIndex;
     this.smoothWetTideMemory = initialState.tidal.springNeapIndex;
     this.smoothSwellEnergy = initialState.tidal.swellEnergy;
@@ -1203,6 +1234,10 @@ export class CosmicSceneRenderer {
     this.prevDayLibLon = prevState.lunar.librationLonRad;
     this.nextDayLibLat = nextState.lunar.librationLatRad;
     this.prevDayLibLat = prevState.lunar.librationLatRad;
+    this.nextDayTide = nextState.tidal.springNeapIndex;
+    this.prevDayTide = prevState.tidal.springNeapIndex;
+    this.nextDaySwell = nextState.tidal.swellEnergy;
+    this.prevDaySwell = prevState.tidal.swellEnergy;
   }
 
   setMonthDragState(dragging: boolean, fraction: number) {
@@ -1211,21 +1246,8 @@ export class CosmicSceneRenderer {
   }
 
   setDayDragState(dragging: boolean, fraction: number) {
-    const wasDragging = this.dayDragging;
-    const clampedFraction = THREE.MathUtils.clamp(fraction, -1, 1);
-    const moved = Math.abs(clampedFraction - this.dragDayFraction) > 0.002;
     this.dayDragging = dragging;
-    this.dragDayFraction = clampedFraction;
-
-    if (dragging && moved && !this.reducedMotion) {
-      // Keep the ocean calm while the user is actively scrubbing through lunar phases
-      this.tideDebounceRemaining = TIDE_DEBOUNCE_SEC;
-    } else if (wasDragging && !dragging && !this.reducedMotion) {
-      // Pointer released: commit the new tidal equilibrium after a brief natural settle beat
-      if (this.tideDebounceRemaining > TIDE_RELEASE_SETTLE_SEC) {
-        this.tideDebounceRemaining = TIDE_RELEASE_SETTLE_SEC;
-      }
-    }
+    this.dragDayFraction = THREE.MathUtils.clamp(fraction, -1, 1);
   }
 
   setState(next: CosmicState) {
@@ -1294,17 +1316,6 @@ export class CosmicSceneRenderer {
         shortestCycleDelta(this.smoothDayAge, next.lunar.synodicAgeDays, SYNODIC_MONTH_DAYS);
     }
 
-    // Debounce coastal tide & swell updates in Day mode so scrubbing never makes water twitch
-    this.pendingTideLevel = next.tidal.springNeapIndex;
-    this.pendingSwellEnergy = next.tidal.swellEnergy;
-    if (this.mode === "day" && !this.reducedMotion) {
-      this.tideDebounceRemaining = TIDE_DEBOUNCE_SEC;
-    } else {
-      this.tideDebounceRemaining = 0;
-      this.committedTideLevel = this.pendingTideLevel;
-      this.committedSwellEnergy = this.pendingSwellEnergy;
-    }
-
     this.updateMonthNeighbors();
     this.updateDayNeighbors();
 
@@ -1324,19 +1335,13 @@ export class CosmicSceneRenderer {
     if (mode !== "day") {
       this.dayDragging = false;
       this.dragDayFraction = 0;
-      this.tideDebounceRemaining = 0;
-      this.committedTideLevel = this.pendingTideLevel;
-      this.committedSwellEnergy = this.pendingSwellEnergy;
     } else {
       // Entering Day mode: align ocean immediately to the current date's tidal level
-      this.tideDebounceRemaining = 0;
-      this.committedTideLevel = this.cosmicState.tidal.springNeapIndex;
-      this.committedSwellEnergy = this.cosmicState.tidal.swellEnergy;
-      this.pendingTideLevel = this.committedTideLevel;
-      this.pendingSwellEnergy = this.committedSwellEnergy;
-      this.smoothTideLevel = this.committedTideLevel;
-      this.smoothWetTideMemory = this.committedTideLevel;
-      this.smoothSwellEnergy = this.committedSwellEnergy;
+      this.smoothTideLevel = this.cosmicState.tidal.springNeapIndex;
+      this.smoothWetTideMemory = this.smoothTideLevel;
+      this.smoothSwellEnergy = this.cosmicState.tidal.swellEnergy;
+      this.tideVelocity = 0;
+      this.swellVelocity = 0;
     }
 
     if ((mode === "day" || mode === "year") && this.earthRigBlend > 0.95) {
@@ -1394,7 +1399,6 @@ export class CosmicSceneRenderer {
     this.dragMonthFraction = 0;
     this.dayDragging = false;
     this.dragDayFraction = 0;
-    this.tideDebounceRemaining = 0;
 
     this.targetOrbitAngle = this.cosmicState.solar.earthHeliocentricLongitudeRad;
     this.smoothOrbitAngle = this.targetOrbitAngle;
@@ -1423,13 +1427,11 @@ export class CosmicSceneRenderer {
     this.smoothMoonEarthshine = this.cosmicState.lunar.earthshine;
     this.smoothMoonScale = this.cosmicState.lunar.apparentScale;
 
-    this.pendingTideLevel = this.cosmicState.tidal.springNeapIndex;
-    this.pendingSwellEnergy = this.cosmicState.tidal.swellEnergy;
-    this.committedTideLevel = this.pendingTideLevel;
-    this.committedSwellEnergy = this.pendingSwellEnergy;
-    this.smoothTideLevel = this.committedTideLevel;
-    this.smoothWetTideMemory = this.committedTideLevel;
-    this.smoothSwellEnergy = this.committedSwellEnergy;
+    this.smoothTideLevel = this.cosmicState.tidal.springNeapIndex;
+    this.smoothWetTideMemory = this.smoothTideLevel;
+    this.smoothSwellEnergy = this.cosmicState.tidal.swellEnergy;
+    this.tideVelocity = 0;
+    this.swellVelocity = 0;
 
     this.smoothEpochYears = this.cosmicState.galactic.epochYearsSinceJ2000;
     this.smoothPrecession = this.cosmicState.galactic.axialPrecessionRad;
@@ -1710,7 +1712,6 @@ export class CosmicSceneRenderer {
     const orbitLambda = this.reducedMotion ? 60 : this.monthDragging ? 12.5 : 6.5;
     const dayLambda = this.reducedMotion ? 60 : this.dayDragging ? 18.0 : 9.5;
     const astroLambda = this.reducedMotion ? 60 : 7.5;
-    const tideLambda = this.reducedMotion ? 60 : 1.05;
     const camLambda = this.reducedMotion ? 60 : 5.6;
     const fadeLambda = this.reducedMotion ? 60 : 6.4;
 
@@ -1906,26 +1907,60 @@ export class CosmicSceneRenderer {
       }
     }
 
-    // Debounced commit & slow natural ocean tide response (~2.5-3.5s settle)
-    if (this.tideDebounceRemaining > 0) {
-      this.tideDebounceRemaining = Math.max(0, this.tideDebounceRemaining - dt);
-      if (this.tideDebounceRemaining === 0) {
-        this.committedTideLevel = this.pendingTideLevel;
-        this.committedSwellEnergy = this.pendingSwellEnergy;
-      }
+    // Continuous sub-day tidal target with steady, constant-speed shoreline drift (zero jerk/debounce snap)
+    const targetTideLevel =
+      dayFraction >= 0
+        ? THREE.MathUtils.lerp(
+            this.cosmicState.tidal.springNeapIndex,
+            this.nextDayTide,
+            dayFraction,
+          )
+        : THREE.MathUtils.lerp(
+            this.cosmicState.tidal.springNeapIndex,
+            this.prevDayTide,
+            -dayFraction,
+          );
+    const targetSwellEnergy =
+      dayFraction >= 0
+        ? THREE.MathUtils.lerp(this.cosmicState.tidal.swellEnergy, this.nextDaySwell, dayFraction)
+        : THREE.MathUtils.lerp(this.cosmicState.tidal.swellEnergy, this.prevDaySwell, -dayFraction);
+
+    if (this.reducedMotion) {
+      this.smoothTideLevel = targetTideLevel;
+      this.smoothSwellEnergy = targetSwellEnergy;
+      this.tideVelocity = 0;
+      this.swellVelocity = 0;
+    } else {
+      const [nextTide, nextTideVel] = advanceSmoothLinear(
+        this.smoothTideLevel,
+        targetTideLevel,
+        this.tideVelocity,
+        TIDE_DRIFT_SPEED,
+        TIDE_DRIFT_ACCEL,
+        TIDE_ARRIVAL_BAND,
+        dt,
+      );
+      this.smoothTideLevel = nextTide;
+      this.tideVelocity = nextTideVel;
+
+      // Keep swell energy (range 0.25..1.0 = 0.75 * springNeapIndex) paced in exact lockstep with tide
+      const [nextSwell, nextSwellVel] = advanceSmoothLinear(
+        this.smoothSwellEnergy,
+        targetSwellEnergy,
+        this.swellVelocity,
+        TIDE_DRIFT_SPEED * 0.75,
+        TIDE_DRIFT_ACCEL * 0.75,
+        TIDE_ARRIVAL_BAND * 0.75,
+        dt,
+      );
+      this.smoothSwellEnergy = nextSwell;
+      this.swellVelocity = nextSwellVel;
     }
-    this.smoothTideLevel = damp(this.smoothTideLevel, this.committedTideLevel, tideLambda, dt);
-    this.smoothSwellEnergy = damp(
-      this.smoothSwellEnergy,
-      this.committedSwellEnergy,
-      tideLambda * 0.9,
-      dt,
-    );
     // Wet sand dries slower than water recedes, leaving a glistening reflective coastal trail
     if (this.smoothTideLevel >= this.smoothWetTideMemory || this.reducedMotion) {
       this.smoothWetTideMemory = this.smoothTideLevel;
     } else {
-      this.smoothWetTideMemory = damp(this.smoothWetTideMemory, this.smoothTideLevel, 0.28, dt);
+      this.smoothWetTideMemory = damp(this.smoothWetTideMemory, this.smoothTideLevel, 0.24, dt);
     }
 
     this.smoothEpochYears = damp(

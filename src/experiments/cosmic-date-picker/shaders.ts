@@ -317,7 +317,9 @@ varying vec2 vUv;
 
 void main() {
   float across = abs(vUv.y - 0.5) * 2.0;
-  float fwY = max(fwidth(across), 0.04);
+  // Compute derivative on linear vUv.y (not abs()) so 2x2 pixel quads straddling the centerline
+  // never cancel dFdy to zero and create periodic darkened bands along gentle horizontal curves
+  float fwY = max(length(vec2(dFdx(vUv.y), dFdy(vUv.y))) * 2.0, 0.001);
 
   float absAlong = abs(vUv.x);
   // Crisp clearance gap around the Moon disc (scales dynamically with perigee/apogee diameter)
@@ -325,8 +327,8 @@ void main() {
   float endFade = smoothstep(uHalfSpan, uHalfSpan * 0.28, absAlong);
   if (moonClear * endFade < 0.002) discard;
 
-  float lineW = fwY * 0.55;
-  float hairline = 1.0 - smoothstep(lineW, lineW + fwY * 1.15, across);
+  // Partition-of-unity 1px-feathered hairline: constant integrated brightness at every sub-pixel offset
+  float hairline = 1.0 - smoothstep(fwY * 0.5, fwY * 1.5, across);
 
   // Perpendicular engineering graduations synced 1:1 with lunar synodic age:
   // minor tick = 1 exact day, major tick = exact phase quarter (29.530588853 / 4 = 7.382647213d)
@@ -378,28 +380,30 @@ float beachBedHeight(float s) {
   return slope + upperBerm + deepDrop;
 }
 
-float evalOceanWaves(float sRel, float along, float t, float swellEnergy, out float crestOut) {
+float evalOceanWaves(float s, float sRel, float along, float t, float swellEnergy, out float crestOut) {
   // Waves compress slightly and shoal as they approach the beach (sRel -> 0)
   float shoalBoost = 1.0 + 0.42 * exp(-pow((sRel + 1.15) / 0.95, 2.0));
   float shoreAtten = smoothstep(0.18, -0.58, sRel);
   float amp = (0.024 + 0.048 * swellEnergy) * shoalBoost * shoreAtten;
 
-  // Primary long-period ocean swell rolling diagonally onto the beach
-  float p1 = sRel * 1.55 + along * 0.32 - t * 0.88 + 0.45 * sin(along * 0.24 - t * 0.18);
+  // Primary long-period ocean swell rolling diagonally onto the beach in world coordinates
+  // (anchored to world s so tide-level shifts never drag open-ocean swells sideways)
+  float p1 = s * 1.55 + along * 0.32 - t * 0.88 + 0.45 * sin(along * 0.24 - t * 0.18);
   float w1 = (pow(max(0.5 + 0.5 * sin(p1), 0.0001), 1.6) - 0.42) * amp * 1.48;
 
   // Secondary cross-swell creating natural wave sets
-  float p2 = sRel * 2.25 - along * 0.62 - t * 1.18;
+  float p2 = s * 2.25 - along * 0.62 - t * 1.18;
   float w2 = (pow(max(0.5 + 0.5 * sin(p2), 0.0001), 1.45) - 0.44) * amp * 0.62;
 
   // Shorter wind swell
-  float p3 = sRel * 3.55 + along * 1.15 - t * 1.62;
+  float p3 = s * 3.55 + along * 1.15 - t * 1.62;
   float w3 = sin(p3) * amp * 0.24;
 
   float total = w1 + w2 + w3;
-  // Breaking crest energy peaks in the shallow surf zone when swells crest
-  float breakerZone = exp(-pow((sRel + 1.05) / 0.85, 2.0));
-  crestOut = clamp((w1 / max(amp, 0.001) - 0.16) * 1.28, 0.0, 1.0) * breakerZone;
+  // Breaking crest energy peaks in the shallow surf zone in organic along-shore pockets
+  float breakerZone = exp(-pow((sRel + 1.15) / 0.78, 2.0));
+  float alongBreak = 0.62 + 0.38 * sin(along * 0.58 + 0.9) * cos(along * 0.27 - t * 0.09);
+  crestOut = clamp((w1 / max(amp, 0.001) - 0.24) * 1.32, 0.0, 1.0) * breakerZone * alongBreak;
   return total;
 }
 
@@ -408,7 +412,7 @@ float sampleWaveAtXZ(float x, float z, float sEq, float t, float swellEnergy) {
   float s = (x - shoreX) * 0.946;
   float along = z * 0.946 - x * 0.322;
   float dummyCrest = 0.0;
-  return evalOceanWaves(s - sEq, along, t, swellEnergy, dummyCrest);
+  return evalOceanWaves(s, s - sEq, along, t, swellEnergy, dummyCrest);
 }
 
 void main() {
@@ -427,7 +431,7 @@ void main() {
   float horizonCurve = -0.000045 * max(distZ - 26.0, 0.0) * max(distZ - 26.0, 0.0);
 
   float crest = 0.0;
-  float rawWaveH = evalOceanWaves(sRel, along, uTime, uSwellEnergy, crest);
+  float rawWaveH = evalOceanWaves(s, sRel, along, uTime, uSwellEnergy, crest);
   float waveH = rawWaveH * nearFade;
   float sandH = beachBedHeight(s);
 
@@ -523,24 +527,29 @@ float beachBedHeight(float s) {
   return slope + upperBerm + deepDrop;
 }
 
-// Asymmetric real coastal swash cycle: brisk uprush, soft apex hang, slower thinning backwash
+// Smooth C1-continuous coastal swash cycle: gentle surf emergence, brisk uprush, soft apex hang, thinning backwash
 void swashCycle(float cyc, out float reach, out float vel, out float freshUprush) {
   float c = fract(cyc);
-  if (c < 0.34) {
-    float u = c / 0.34;
+  if (c < 0.38) {
+    float u = c / 0.38;
     float s = sin(u * 1.5707963);
-    reach = pow(max(s, 0.0001), 0.76);
-    vel = cos(u * 1.5707963);
-    freshUprush = smoothstep(0.0, 0.18, u) * (1.0 - smoothstep(0.75, 1.0, u));
-  } else if (c < 0.46) {
-    float u = (c - 0.34) / 0.12;
-    reach = 1.0 - 0.025 * u * u;
-    vel = -0.08 * u;
-    freshUprush = 0.15 * (1.0 - u);
+    float co = cos(u * 1.5707963);
+    reach = pow(max(s, 0.0001), 1.72);
+    // Smooth derivative: starts at 0 at c=0 (no pop-in), peaks briskly mid-uprush, eases to 0 at apex
+    vel = clamp(1.72 * pow(max(s, 0.0001), 0.72) * co * 1.18, 0.0, 1.0);
+    freshUprush = smoothstep(0.05, 0.32, u) * (1.0 - smoothstep(0.76, 1.0, u));
+  } else if (c < 0.48) {
+    float u = (c - 0.38) / 0.10;
+    reach = 1.0 - 0.02 * u * u;
+    vel = -0.05 * u;
+    freshUprush = 0.0;
   } else {
-    float u = (c - 0.46) / 0.54;
-    reach = 0.975 * pow(max(cos(u * 1.5707963), 0.0001), 1.48);
-    vel = -sin(u * 1.5707963);
+    float u = (c - 0.48) / 0.52;
+    float co = cos(u * 1.5707963);
+    float s = sin(u * 1.5707963);
+    reach = 0.98 * pow(max(co, 0.0001), 1.42);
+    // Smooth derivative: returns cleanly to 0 as backwash dissolves into surf at c=1
+    vel = -clamp(1.42 * pow(max(co, 0.0001), 0.42) * s * 1.12, 0.0, 1.0);
     freshUprush = 0.0;
   }
 }
@@ -570,85 +579,121 @@ void main() {
   float sEq = tideBaseY / 0.072;
   float sRel = s - sEq;
 
-  // Evaluate 3 overlapping organic coastal swash tongues along the diagonal beach
-  float swashDepth = 0.0;
-  float leadingFoam = 0.0;
-  float trailFoam = 0.0;
-  float meniscusRim = 0.0;
-  float meniscusSlope = 0.0;
-  float contactShadow = 0.0;
+  // Evaluate a coherent 2-wave coastal swash train (half-cycle offset from the same swell)
+  // so an incoming lower wave naturally rolls in as a soft frothy bore and seamlessly overtakes
+  // the receding upper swash edge without artificial duplicate ribbons or retreating ghost lines.
+  float edgeS[2];
+  float waveReach[2];
+  float waveVel[2];
+  float waveUprush[2];
 
-  float periods[3];
-  periods[0] = 7.4;
-  periods[1] = 10.6;
-  periods[2] = 5.9;
+  float basePeriod = 9.2;
+  float sharedWarp = fbm(vec2(along * 0.20, 1.7));
 
-  float weights[3];
-  weights[0] = 1.0;
-  weights[1] = 0.86;
-  weights[2] = 0.68;
-
-  float phases[3];
-  phases[0] = 0.12;
-  phases[1] = 0.57;
-  phases[2] = 0.81;
-
-  for (int k = 0; k < 3; k++) {
+  for (int k = 0; k < 2; k++) {
     float fk = float(k);
-    float alongWarp = fbm(vec2(along * 0.24 + fk * 3.7, fk * 2.1));
-    float cyc = uTime / periods[k] - along * (0.048 + 0.012 * fk) - alongWarp * 0.42 + phases[k];
+    float localWarp = (fbm(vec2(along * 0.28 + fk * 4.3, uTime * 0.018 + fk * 2.1)) - 0.5) * 0.16;
+    float cyc = uTime / basePeriod - along * 0.048 - sharedWarp * 0.24 + localWarp + fk * 0.5;
 
     float reach = 0.0;
     float vel = 0.0;
     float uprush = 0.0;
     swashCycle(cyc, reach, vel, uprush);
 
-    // Smoothly evolving scalloped water tongues (continuous in time so edges never pop)
-    float scallopMacro = (fbm(vec2(along * 0.58 + fk * 5.3, uTime * 0.055 + fk * 1.7)) - 0.5) * 0.50;
-    float scallopMicro = (fbm(vec2(along * 2.15 - fk * 2.7, uTime * 0.095 + fk * 4.1)) - 0.5) * 0.17;
-    float scallop = (scallopMacro + scallopMicro) * (0.35 + 0.65 * reach);
+    // Gentle wave-set amplitude modulation so consecutive waves vary organically in reach
+    float setMod = 0.92 + 0.11 * sin(uTime * 0.23 + fk * 2.4 + along * 0.14);
 
-    float maxRunup = (0.58 + 0.64 * uSwellEnergy) * weights[k];
-    float edgeS = -0.36 + maxRunup * reach + scallop;
-    float distBehind = edgeS - sRel;
+    // Smoothly evolving scalloped water tongues (gentler in the surf, fuller up on the sand)
+    float scallopMacro = (fbm(vec2(along * 0.55 + fk * 5.3, uTime * 0.048 + fk * 1.7)) - 0.5) * 0.44;
+    float scallopMicro = (fbm(vec2(along * 2.15 - fk * 2.7, uTime * 0.085 + fk * 4.1)) - 0.5) * 0.15;
+    float scallop = (scallopMacro + scallopMicro) * (0.22 + 0.78 * reach);
 
-    // Subtle micro contact shadow on the sand millimeter-ahead of an advancing liquid lip
-    float shadow = exp(-pow((distBehind + 0.008) / 0.016, 2.0)) * (0.35 + 0.65 * max(vel, 0.0));
+    float maxRunup = (0.90 + 0.58 * uSwellEnergy) * setMod;
+    edgeS[k] = -0.54 + maxRunup * reach + scallop;
+    waveReach[k] = reach;
+    waveVel[k] = vel;
+    waveUprush[k] = uprush;
+  }
+
+  float outerEdgeS = max(edgeS[0], edgeS[1]);
+
+  float swashDepth = 0.0;
+  float leadingFoam = 0.0;
+  float innerBoreFoam = 0.0;
+  float trailFoam = 0.0;
+  float meniscusRim = 0.0;
+  float meniscusSlope = 0.0;
+  float contactShadow = 0.0;
+
+  for (int k = 0; k < 2; k++) {
+    float fk = float(k);
+    float reach = waveReach[k];
+    float vel = waveVel[k];
+    float uprush = waveUprush[k];
+    float distBehind = edgeS[k] - sRel;
+
+    // Smoothly distinguish the outermost wave touching sand (isOuter -> 1)
+    // from an incoming lower wave rolling over existing shallow backwash (isInner -> 1)
+    float behindOuter = max(outerEdgeS - edgeS[k], 0.0);
+    float isOuter = 1.0 - smoothstep(0.0, 0.16, behindOuter);
+    float isInner = 1.0 - isOuter;
+
+    // Only an actively advancing inner wave creates a rolling bore; retreating submerged sheets dissolve cleanly
+    float innerAdvance = isInner * smoothstep(0.04, 0.34, vel) * smoothstep(0.06, 0.30, reach);
+
+    // Subtle micro contact shadow on dry/wet sand ONLY ahead of the outermost water-to-sand lip
+    float shadow = exp(-pow((distBehind + 0.008) / 0.016, 2.0))
+      * (0.22 + 0.78 * smoothstep(-0.25, 0.45, vel)) * isOuter;
     contactShadow = max(contactShadow, shadow);
 
-    if (distBehind > -0.02) {
-      // Thin physical water film tapering smoothly into a curved liquid meniscus at distBehind = 0
+    if (distBehind > -0.06) {
+      // Thin physical water film tapering smoothly into a curved liquid meniscus at the outer shoreline
       float sheet = smoothstep(0.0, 0.26, distBehind) * (0.011 + 0.022 * reach * (0.42 + 0.58 * uSwellEnergy));
-      // Tiny raised bore lip right at the front of an advancing wave
-      float boreLip = exp(-pow((distBehind - 0.024) / 0.026, 2.0)) * (0.0034 + 0.0048 * uprush);
-      float layerDepth = sheet + boreLip * smoothstep(0.0, 0.012, distBehind);
+      // Tiny raised capillary lip at the outer sand boundary + broader rolling water step on an advancing inner bore
+      float outerLip = exp(-pow((distBehind - 0.024) / 0.026, 2.0)) * (0.0028 + 0.0050 * uprush) * isOuter;
+      float innerRoll = exp(-pow((distBehind - 0.060) / 0.085, 2.0)) * 0.0055 * innerAdvance;
+      float layerDepth = sheet + (outerLip + innerRoll) * smoothstep(-0.01, 0.02, distBehind);
       swashDepth = max(swashDepth, layerDepth);
 
-      // Curved 3D bore-lip slope: front slopes down to sand, back faces Moon to catch specular glint
-      float lipSlope = -((distBehind - 0.024) / 0.024) * exp(-pow((distBehind - 0.024) / 0.024, 2.0)) * (0.42 + 0.58 * uprush);
-      if (abs(lipSlope) > abs(meniscusSlope)) {
-        meniscusSlope = lipSlope;
+      // Curved 3D wave slope:
+      // - Outer wave: crisp narrow liquid lip catching lunar glint on sand
+      // - Inner advancing roller: softer, broader rolling swell front catching gentle moonlight
+      float outerSlope = -((distBehind - 0.024) / 0.024) * exp(-pow((distBehind - 0.024) / 0.024, 2.0))
+        * (0.26 + 0.74 * uprush) * isOuter;
+      float innerSlope = -((distBehind - 0.065) / 0.078) * exp(-pow((distBehind - 0.065) / 0.078, 2.0))
+        * 0.52 * innerAdvance;
+      float combinedSlope = outerSlope + innerSlope;
+      if (abs(combinedSlope) > abs(meniscusSlope)) {
+        meniscusSlope = combinedSlope;
       }
 
-      // Razor-thin specular meniscus right at the liquid boundary where the wave meets sand
-      float rim = exp(-pow((distBehind - 0.022) / 0.02, 2.0)) * (0.45 + 0.55 * max(vel, 0.0));
+      // Razor-thin specular meniscus ONLY at the outer water-meets-sand boundary
+      float rim = exp(-pow((distBehind - 0.022) / 0.020, 2.0))
+        * (0.20 + 0.80 * smoothstep(-0.35, 0.45, vel)) * isOuter;
       meniscusRim = max(meniscusRim, rim);
 
-      // Leading-edge lacy seafoam concentrated right along the advancing/stalling lip
-      float lipBand = smoothstep(-0.006, 0.016, distBehind) * exp(-max(distBehind - 0.014, 0.0) / (0.088 + 0.055 * uprush));
-      float lipStrength = (0.36 + 0.64 * smoothstep(-0.45, 0.55, vel)) * (0.55 + 0.45 * uSwellEnergy);
+      // Leading-edge lacy seafoam concentrated along the outermost shoreline
+      float lipBand = smoothstep(-0.006, 0.016, distBehind)
+        * exp(-max(distBehind - 0.014, 0.0) / (0.088 + 0.055 * uprush));
+      float lipStrength = (0.28 + 0.72 * smoothstep(-0.45, 0.45, vel)) * (0.55 + 0.45 * uSwellEnergy) * isOuter;
       leadingFoam = max(leadingFoam, lipBand * lipStrength);
 
+      // Soft, organically feathered tumbling whitewater bore for an incoming lower wave rolling over backwash
+      float boreFront = smoothstep(-0.045, 0.075, distBehind)
+        * exp(-max(distBehind - 0.055, 0.0) / (0.20 + 0.12 * uprush));
+      float boreAlongVar = 0.48 + 0.52 * fbm(vec2(along * 0.62 + fk * 3.7, uTime * 0.055 + fk * 1.9));
+      innerBoreFoam = max(innerBoreFoam, boreFront * boreAlongVar * innerAdvance * (0.45 + 0.55 * uSwellEnergy));
+
       // Delicate gossamer trailing foam web dragged across the shallow water sheet
-      float trailBand = smoothstep(0.02, 0.14, distBehind) * exp(-max(distBehind - 0.12, 0.0) / 0.44);
-      float trailFade = 0.25 + 0.55 * reach;
+      float trailBand = smoothstep(0.02, 0.14, distBehind) * exp(-max(distBehind - 0.12, 0.0) / 0.46);
+      float trailFade = (0.22 + 0.52 * reach) * (isOuter + innerAdvance * 0.45);
       trailFoam = max(trailFoam, trailBand * trailFade * (0.45 + 0.55 * uSwellEnergy));
     }
   }
 
   // Smooth continuous wet-sand high-water reach envelope (never jumps between wave cycles)
-  float peakReachEnv = -0.24 + (0.58 + 0.64 * uSwellEnergy)
-    + (fbm(vec2(along * 0.52, uTime * 0.025)) - 0.5) * 0.34;
+  float peakReachEnv = -0.44 + (0.90 + 0.58 * uSwellEnergy)
+    + (fbm(vec2(along * 0.52, uTime * 0.025)) - 0.5) * 0.30;
 
   float sandH = beachBedHeight(s);
   float deepDepth = max(0.0, (tideBaseY + vWaveHeight) - sandH);
@@ -669,8 +714,8 @@ void main() {
   vec3 starAmbient = vec3(0.085, 0.125, 0.195);
 
   // ---------------- SAND & GLOSSY WET BEACH ----------------
-  // Wet sand envelope: recently washed swash zone + slower receding tidal memory
-  float wetMemoryExtra = max(uWetTideMemory - uTideLevel, 0.0) * 1.95;
+  // Wet sand envelope: recently washed swash zone + slower receding tidal memory pinned to world sand
+  float wetMemoryExtra = max(uWetTideMemory - uTideLevel, 0.0) * 2.26;
   float wetNoise = (fbm(vec2(along * 0.95, s * 1.4)) - 0.5) * 0.18;
   float wetLimitS = peakReachEnv + 0.18 + wetMemoryExtra + wetNoise;
   float wetness = smoothstep(wetLimitS + 0.28, wetLimitS - 0.08, sRel);
@@ -761,23 +806,32 @@ void main() {
   waterColor += vec3(0.12, 0.24, 0.40) * sssCrest * 0.40;
 
   // ---------------- LACY SEAFOAM & SHOREBREAK ----------------
-  vec2 foamUv = vec2(along * 1.15, sRel * 2.1);
+  // World-space foam coordinates drifting gently shoreward so tide-level shifts never slide foam like a decal
+  vec2 foamUv = vec2(along * 1.15, s * 2.1 - uTime * 0.10);
   float lace = foamLace(foamUv, uTime);
-  float fineBubbles = noise(foamUv * 9.5 + vec2(uTime * 0.08, 0.0));
+  float fineBubbles = noise(foamUv * 9.5 + vec2(uTime * 0.06, 0.0));
 
-  // 1) Crisp lacy foam along the swash leading edge where the wave ends on sand
+  // 1) Crisp lacy foam along the outer swash leading edge where the wave meets sand
   float edgeFoamMask = leadingFoam * smoothstep(0.12, 0.72, lace * 0.8 + fineBubbles * 0.25);
-  // Continuous ultra-thin bubbly rim right at the very lip of an advancing wave
-  float rimSpark = leadingFoam * smoothstep(0.28, 0.82, leadingFoam + fineBubbles * 0.28) * 0.58;
+  // Continuous ultra-thin bubbly rim right at the outer advancing lip
+  float rimSpark = leadingFoam * smoothstep(0.32, 0.84, leadingFoam + fineBubbles * 0.28) * 0.54;
 
-  // 2) Gossamer trailing foam lace across the shallow swash sheet
-  float trailFoamMask = trailFoam * smoothstep(0.42, 0.86, lace) * 0.66;
+  // 2) Soft, organically broken frothy whitewater on an incoming lower roller gliding over thin backwash
+  float boreTexture = smoothstep(0.24, 0.80, lace * 0.72 + fineBubbles * 0.32);
+  float innerBoreMask = innerBoreFoam * boreTexture * 0.68;
 
-  // 3) Soft shorebreak whitewater on shoaling crests in the surf zone
-  float breakerNoise = foamLace(vec2(along * 0.85, sRel * 1.35) + vec2(0.0, -uTime * 0.12), uTime);
-  float breakerFoam = vWaveCrest * (0.35 + 0.65 * uSwellEnergy) * smoothstep(0.24, 0.76, breakerNoise) * 0.82;
+  // 3) Gossamer trailing foam lace across the shallow swash sheet
+  float trailFoamMask = trailFoam * smoothstep(0.42, 0.86, lace) * 0.64;
 
-  float totalFoam = clamp(max(max(edgeFoamMask, rimSpark), max(trailFoamMask, breakerFoam)), 0.0, 1.0);
+  // 4) Soft shorebreak whitewater on shoaling crests in the surf zone
+  float breakerNoise = foamLace(vec2(along * 0.85, s * 1.35 - uTime * 0.16), uTime);
+  float breakerFoam = vWaveCrest * (0.32 + 0.68 * uSwellEnergy) * smoothstep(0.30, 0.80, breakerNoise) * 0.68;
+
+  float totalFoam = clamp(
+    max(max(edgeFoamMask, rimSpark), max(max(innerBoreMask, trailFoamMask), breakerFoam)),
+    0.0,
+    1.0
+  );
   // Foam dims gracefully toward the far horizon to prevent pixel noise
   totalFoam *= mix(1.0, 0.26, clamp(distCam / 32.0, 0.0, 1.0));
 
@@ -1072,7 +1126,7 @@ varying vec2 vUv;
 
 void main() {
   float across = abs(vUv.y - 0.5) * 2.0;
-  float fwY = max(fwidth(across), 0.04);
+  float fwY = max(length(vec2(dFdx(vUv.y), dFdy(vUv.y))) * 2.0, 0.001);
 
   float dAngle = mod(vUv.x - uEarthAngle + 3.14159265, 6.2831853) - 3.14159265;
   float absAngle = abs(dAngle);
@@ -1083,8 +1137,7 @@ void main() {
     : smoothstep(0.68, 0.22, absAngle);
   if (arcFade < 0.002) discard;
 
-  float lineW = fwY * 0.55;
-  float hairline = 1.0 - smoothstep(lineW, lineW + fwY * 1.15, across);
+  float hairline = 1.0 - smoothstep(fwY * 0.5, fwY * 1.5, across);
 
   // Crisp perpendicular engineering graduations: 48 minor ticks (4/month) + 12 major month ticks
   float minorCoord = vUv.x * (48.0 / 6.2831853);
@@ -1125,14 +1178,13 @@ varying vec2 vUv;
 
 void main() {
   float across = abs(vUv.y - 0.5) * 2.0;
-  float fwY = max(fwidth(across), 0.04);
+  float fwY = max(length(vec2(dFdx(vUv.y), dFdy(vUv.y))) * 2.0, 0.001);
 
   float absAlong = abs(vUv.x);
   float sunClear = smoothstep(0.18, 0.5, absAlong);
   float endFade = smoothstep(5.4, 1.7, absAlong);
 
-  float lineW = fwY * 0.55;
-  float hairline = 1.0 - smoothstep(lineW, lineW + fwY * 1.15, across);
+  float hairline = 1.0 - smoothstep(fwY * 0.5, fwY * 1.5, across);
 
   // Crisp perpendicular engineering graduations synced 1:1 with galactic drift (1 tick = 1 year)
   float yearCoord = (vUv.x + uDrift) / 0.36;
