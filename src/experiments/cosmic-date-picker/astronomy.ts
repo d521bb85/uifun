@@ -123,23 +123,13 @@ export function addDateSegment(
     const maxDay = daysInMonth(nextYear, parsed.month);
     nextIso = formatIsoDate(nextYear, parsed.month, Math.min(parsed.day, maxDay));
   } else if (unit === "month") {
-    const totalMonths = (parsed.year - 1) * 12 + (parsed.month - 1) + delta;
-    const clampedMonths = clamp(totalMonths, 0, 9999 * 12 - 1);
-    const nextYear = Math.floor(clampedMonths / 12) + 1;
-    const nextMonth = (clampedMonths % 12) + 1;
-    const maxDay = daysInMonth(nextYear, nextMonth);
-    nextIso = formatIsoDate(nextYear, nextMonth, Math.min(parsed.day, maxDay));
+    const nextMonth = ((((parsed.month - 1 + delta) % 12) + 12) % 12) + 1;
+    const maxDay = daysInMonth(parsed.year, nextMonth);
+    nextIso = formatIsoDate(parsed.year, nextMonth, Math.min(parsed.day, maxDay));
   } else {
-    const utc = new Date(0);
-    utc.setUTCFullYear(parsed.year, parsed.month - 1, parsed.day + delta);
-    const nextYear = utc.getUTCFullYear();
-    if (nextYear < 1) {
-      nextIso = "0001-01-01";
-    } else if (nextYear > 9999) {
-      nextIso = "9999-12-31";
-    } else {
-      nextIso = formatIsoDate(nextYear, utc.getUTCMonth() + 1, utc.getUTCDate());
-    }
+    const maxDay = daysInMonth(parsed.year, parsed.month);
+    const nextDay = ((((parsed.day - 1 + delta) % maxDay) + maxDay) % maxDay) + 1;
+    nextIso = formatIsoDate(parsed.year, parsed.month, nextDay);
   }
 
   if (nextIso < minIso) return minIso;
@@ -406,4 +396,56 @@ export function computeCosmicState(isoDate: string): CosmicState {
     tidal,
     galactic,
   };
+}
+
+/**
+ * Computes the unit vector from Earth toward the Sun in right-handed ecliptic
+ * world coordinates (+X = Vernal Equinox, +Y = Ecliptic North, -Z = Summer Solstice Sun).
+ */
+export function computeSunDirectionEcliptic(solar: SolarState): [number, number, number] {
+  const lon = solar.earthHeliocentricLongitudeRad;
+  return [-Math.cos(lon), 0, Math.sin(lon)];
+}
+
+/**
+ * Computes the geocentric unit direction from Earth toward the Moon in right-handed
+ * ecliptic world coordinates (+X = Vernal Equinox, +Y = Ecliptic North,
+ * -Z = Summer Solstice Sun).
+ */
+export function computeLunarDirectionEcliptic(lunar: LunarState): [number, number, number] {
+  const cosLat = Math.cos(lunar.latitudeRad);
+  return [
+    cosLat * Math.cos(lunar.longitudeRad),
+    Math.sin(lunar.latitudeRad),
+    -cosLat * Math.sin(lunar.longitudeRad),
+  ];
+}
+
+/**
+ * Transforms a geographic point (latitude, longitude in radians, East positive)
+ * into its unit surface normal in right-handed ecliptic world coordinates
+ * matching Three.js SphereGeometry with earthAxisGroup.rotation.x = -obliquityRad
+ * and earthSpinGroup.rotation.y = gmstRad.
+ */
+export function geographicToEclipticNormal(
+  latRad: number,
+  lonRad: number,
+  obliquityRad: number,
+  gmstRad: number,
+): [number, number, number] {
+  // Equatorial right ascension of the geographic meridian
+  const ra = lonRad + gmstRad;
+  const cosLat = Math.cos(latRad);
+  const xEq = cosLat * Math.cos(ra);
+  const yEq = Math.sin(latRad);
+  const zEq = -cosLat * Math.sin(ra);
+
+  // Rotate around +X by -obliquityRad (Earth's North Pole tilts toward -Z = Summer Solstice Sun)
+  const cosE = Math.cos(obliquityRad);
+  const sinE = Math.sin(obliquityRad);
+  const xEcl = xEq;
+  const yEcl = yEq * cosE + zEq * sinE;
+  const zEcl = -yEq * sinE + zEq * cosE;
+
+  return [xEcl, yEcl, zEcl];
 }

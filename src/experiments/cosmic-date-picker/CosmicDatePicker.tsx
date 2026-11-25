@@ -21,11 +21,24 @@ import { type CosmicFocusMode, CosmicSceneRenderer } from "./CosmicScene";
 type EditableDateUnit = "year" | "month" | "day";
 
 const DRAG_THRESHOLD_PX = 5;
+const MONTHS_PER_CARD_WIDTH = 24;
+const MONTH_SNAP_THRESHOLD = 1;
 const STEP_PX_BY_UNIT: Record<EditableDateUnit, number> = {
   year: 11,
-  month: 15,
+  month: 460 / MONTHS_PER_CARD_WIDTH,
   day: 9,
 };
+
+function computeSnappedSteps(rawSteps: number, currentSteps: number, threshold: number): number {
+  let next = currentSteps;
+  while (rawSteps - next >= threshold) {
+    next += 1;
+  }
+  while (next - rawSteps >= threshold) {
+    next -= 1;
+  }
+  return next;
+}
 
 function isEditableUnit(type: string | null | undefined): type is EditableDateUnit {
   return type === "year" || type === "month" || type === "day";
@@ -84,6 +97,8 @@ export function CosmicDatePicker({
   const dragRef = useRef<{
     pointerId: number;
     startX: number;
+    originX: number;
+    stepPx: number;
     appliedSteps: number;
     baseIso: string;
     unit: EditableDateUnit;
@@ -208,6 +223,7 @@ export function CosmicDatePicker({
       }
       setDragging(false);
     }
+    rendererRef.current?.setMonthDragState(false, 0);
     dragRef.current = null;
   }, []);
 
@@ -265,9 +281,15 @@ export function CosmicDatePicker({
 
     if (readOnly) return;
 
+    const cardWidth = cardRef.current?.getBoundingClientRect().width || 460;
+    const stepPx =
+      activeUnit === "month" ? cardWidth / MONTHS_PER_CARD_WIDTH : STEP_PX_BY_UNIT[activeUnit];
+
     dragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
+      originX: event.clientX,
+      stepPx,
       appliedSteps: 0,
       baseIso: controller.getValue() ?? lastValidIsoRef.current,
       unit: activeUnit,
@@ -285,10 +307,11 @@ export function CosmicDatePicker({
       return;
     }
 
-    const dx = event.clientX - drag.startX;
     if (!drag.active) {
-      if (Math.abs(dx) < DRAG_THRESHOLD_PX) return;
+      if (Math.abs(event.clientX - drag.startX) < DRAG_THRESHOLD_PX) return;
       drag.active = true;
+      // Anchor drag origin here so the first active frame starts smoothly at 0px without a threshold jump
+      drag.originX = event.clientX;
       setDragging(true);
       try {
         event.currentTarget.setPointerCapture?.(event.pointerId);
@@ -301,15 +324,40 @@ export function CosmicDatePicker({
       }
     }
 
-    const stepPx = STEP_PX_BY_UNIT[drag.unit];
-    const nextSteps = Math.trunc(dx / stepPx);
-    if (nextSteps === drag.appliedSteps) return;
+    const dx = event.clientX - drag.originX;
+    const rawSteps = dx / drag.stepPx;
+    const nextSteps =
+      drag.unit === "month"
+        ? computeSnappedSteps(rawSteps, drag.appliedSteps, MONTH_SNAP_THRESHOLD)
+        : Math.trunc(rawSteps);
 
-    drag.appliedSteps = nextSteps;
-    const nextIso = addDateSegment(drag.baseIso, drag.unit, nextSteps, min, max);
-    controller.setValue(nextIso);
-    if (parseIsoDate(nextIso)) {
-      setLastValidIso(nextIso);
+    if (nextSteps !== drag.appliedSteps) {
+      if (drag.unit === "month") {
+        // Step through adjacent months sequentially so WebGL neighbor deltas stay 100% continuous
+        const stepDir = Math.sign(nextSteps - drag.appliedSteps);
+        while (drag.appliedSteps !== nextSteps) {
+          drag.appliedSteps += stepDir;
+          const stepIso = addDateSegment(drag.baseIso, drag.unit, drag.appliedSteps, min, max);
+          if (parseIsoDate(stepIso)) {
+            rendererRef.current?.setState(computeCosmicState(stepIso));
+          }
+        }
+      } else {
+        drag.appliedSteps = nextSteps;
+      }
+
+      const nextIso = addDateSegment(drag.baseIso, drag.unit, nextSteps, min, max);
+      controller.setValue(nextIso);
+      if (parseIsoDate(nextIso)) {
+        if (drag.unit !== "month") {
+          rendererRef.current?.setState(computeCosmicState(nextIso));
+        }
+        setLastValidIso(nextIso);
+      }
+    }
+
+    if (drag.unit === "month") {
+      rendererRef.current?.setMonthDragState(true, rawSteps - nextSteps);
     }
   };
 

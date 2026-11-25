@@ -11,7 +11,7 @@ void main() {
   vWorldPos = worldPosition.xyz;
   vWorldNormal = normalize(mat3(modelMatrix) * normal);
 
-  vec3 localTangent = normalize(vec3(-sin(uv.x * 6.2831853), 0.0, cos(uv.x * 6.2831853)));
+  vec3 localTangent = normalize(vec3(sin(uv.x * 6.2831853), 0.0, cos(uv.x * 6.2831853)));
   vTangent = normalize(mat3(modelMatrix) * localTangent);
   vBitangent = normalize(cross(vWorldNormal, vTangent));
 
@@ -71,16 +71,25 @@ void main() {
   vec3 oceanFresnel = vec3(0.14, 0.42, 0.82) * fresnel * oceanMask * 0.42 * dayFactor;
 
   float terminatorBand = exp(-pow((ndl + 0.015) / 0.048, 2.0));
-  vec3 twilightTint = vec3(0.95, 0.42, 0.18) * terminatorBand * 0.11 * (1.0 - cloudDensity * 0.4);
+  vec3 twilightTint = vec3(0.95, 0.42, 0.18) * terminatorBand * 0.12 * (1.0 - cloudDensity * 0.4);
 
   float limbScatter = pow(1.0 - ndv, 3.1) * smoothstep(-0.14, 0.3, ndl);
   vec3 rayleigh = vec3(0.24, 0.6, 1.0) * limbScatter * 0.72;
 
-  float nightFactor = smoothstep(0.05, -0.18, ndl);
-  vec3 cityGlow = nightLights * vec3(1.0, 0.8, 0.48) * nightFactor * (1.0 - cloudDensity * 0.62) * 1.85;
-  vec3 nightAmbient = dayColor * vec3(0.015, 0.025, 0.052) * nightFactor;
+  float nightFactor = smoothstep(0.06, -0.18, ndl);
+  vec3 cityGlow = nightLights * vec3(1.0, 0.8, 0.48) * nightFactor * (1.0 - cloudDensity * 0.56) * 1.9;
 
-  vec3 color = mix(nightAmbient + cityGlow, litDay + oceanSpec + oceanFresnel, dayFactor) + twilightTint + rayleigh;
+  // Starlight & moonlit fill so the darkest side retains readable landmass/ocean contrast and form
+  float nightRelief = 0.76 + 0.24 * max(dot(bumpedN, normalize(V + vec3(0.0, 0.28, 0.0))), 0.0);
+  vec3 nightLand = (dayColor * vec3(0.11, 0.155, 0.245) + vec3(0.016, 0.026, 0.048)) * nightRelief;
+  vec3 nightOcean = (dayColor * vec3(0.068, 0.105, 0.178) + vec3(0.008, 0.016, 0.036)) * nightRelief;
+  vec3 nightAmbient = mix(nightLand, nightOcean, oceanMask) * (0.45 + 0.55 * nightFactor);
+
+  // Subtle cool atmospheric rim along the dark limb so Earth's spherical outline stays clearly defined
+  float nightLimb = pow(1.0 - ndv, 2.8) * (1.0 - dayFactor * 0.85);
+  vec3 nightRim = vec3(0.16, 0.33, 0.62) * nightLimb * 0.48;
+
+  vec3 color = mix(nightAmbient + cityGlow, litDay + oceanSpec + oceanFresnel, dayFactor) + twilightTint + rayleigh + nightRim;
   gl_FragColor = vec4(color, uOpacity);
 }
 `;
@@ -116,14 +125,16 @@ void main() {
   if (alpha < 0.01) discard;
 
   vec3 N = normalize(vWorldNormal);
+  vec3 V = normalize(cameraPosition - vWorldPos);
   vec3 L = normalize(uSunDir);
   float ndl = dot(N, L);
+  float ndv = max(dot(N, V), 0.0);
 
   float lit = smoothstep(-0.1, 0.24, ndl);
   float sunset = exp(-pow((ndl + 0.01) / 0.055, 2.0));
   vec3 dayCol = vec3(0.97, 0.99, 1.0) * (0.24 + 0.95 * pow(max(ndl, 0.0), 0.78));
   vec3 sunsetCol = vec3(1.0, 0.56, 0.28) * sunset * 0.16;
-  vec3 nightCol = vec3(0.014, 0.022, 0.044);
+  vec3 nightCol = vec3(0.055, 0.085, 0.145) + vec3(0.04, 0.075, 0.14) * pow(1.0 - ndv, 2.4);
 
   vec3 color = mix(nightCol, dayCol, lit) + sunsetCol;
   gl_FragColor = vec4(color, alpha * uOpacity);
@@ -155,7 +166,7 @@ void main() {
   vec3 L = normalize(uSunDir);
 
   float viewDot = max(dot(-N, V), 0.0);
-  float rim = pow(clamp(1.0 - viewDot, 0.0, 1.0), 3.4);
+  float rim = pow(clamp(1.0 - viewDot, 0.0, 1.0), 3.3);
   float outerFalloff = smoothstep(0.0, 0.36, viewDot);
 
   float ndl = dot(N, L);
@@ -163,10 +174,12 @@ void main() {
   float sunsetBand = exp(-pow((ndl + 0.02) / 0.12, 2.0));
 
   vec3 dayHalo = vec3(0.24, 0.62, 1.0);
+  vec3 nightHalo = vec3(0.14, 0.32, 0.64);
   vec3 sunsetHalo = vec3(0.95, 0.48, 0.24);
-  vec3 color = mix(dayHalo, sunsetHalo, sunsetBand * 0.25);
+  vec3 baseHalo = mix(nightHalo, dayHalo, sunMask);
+  vec3 color = mix(baseHalo, sunsetHalo, sunsetBand * 0.25);
 
-  float intensity = rim * outerFalloff * (0.05 + 0.95 * sunMask) * 1.45;
+  float intensity = rim * outerFalloff * (0.24 + 0.76 * sunMask) * 1.48;
   gl_FragColor = vec4(color * intensity, intensity * uOpacity);
 }
 `;
@@ -184,7 +197,7 @@ void main() {
   vWorldPos = worldPosition.xyz;
   vWorldNormal = normalize(mat3(modelMatrix) * normal);
 
-  vec3 localTangent = normalize(vec3(-sin(uv.x * 6.2831853), 0.0, cos(uv.x * 6.2831853)));
+  vec3 localTangent = normalize(vec3(sin(uv.x * 6.2831853), 0.0, cos(uv.x * 6.2831853)));
   vTangent = normalize(mat3(modelMatrix) * localTangent);
   vBitangent = normalize(cross(vWorldNormal, vTangent));
 
@@ -462,9 +475,9 @@ void main() {
   vColor = aColor;
   float speed = 0.85 + fract(aPhase * 0.37) * 1.65;
   float shimmer = 0.62 * sin(uTime * speed + aPhase) + 0.38 * sin(uTime * speed * 1.73 + aPhase * 2.1);
-  vTwinkle = 0.82 + 0.26 * shimmer;
+  vTwinkle = 0.8 + 0.24 * shimmer;
   vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-  gl_PointSize = clamp(aSize * uPixelRatio * uSizeScale * (18.0 / max(-mvPosition.z, 1.0)), 1.0, 9.0);
+  gl_PointSize = clamp(aSize * uPixelRatio * uSizeScale, 1.15 * uPixelRatio, 9.5 * uPixelRatio);
   gl_Position = projectionMatrix * mvPosition;
 }
 `;
@@ -593,5 +606,135 @@ void main() {
   vec3 enhanced = baseSky * (1.0 + uGalacticReveal * 0.85) + nebula * (0.42 + 0.9 * texLuma) * uGalacticReveal;
 
   gl_FragColor = vec4(enhanced, 1.0);
+}
+`;
+
+export const orbitRingVertexShader = /* glsl */ `
+attribute float aAngle;
+attribute float aRadial;
+
+varying float vAngle;
+varying float vRadial;
+varying float vDepth;
+
+void main() {
+  vAngle = aAngle;
+  vRadial = aRadial;
+  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+  vDepth = -mvPosition.z;
+  gl_Position = projectionMatrix * mvPosition;
+}
+`;
+
+export const orbitRingFragmentShader = /* glsl */ `
+uniform float uEarthAngle;
+uniform float uOpacity;
+
+varying float vAngle;
+varying float vRadial;
+varying float vDepth;
+
+void main() {
+  // Razor-sharp anti-aliased hairline core + soft outer bloom across the flat XZ ribbon
+  float core = exp(-vRadial * vRadial * 26.0);
+  float glow = exp(-vRadial * vRadial * 4.2) * 0.24;
+
+  // Shortest signed angular distance behind/ahead of Earth along prograde orbit
+  float rawDiff = mod(vAngle - uEarthAngle + 3.14159265, 6.2831853) - 3.14159265;
+  float dist = abs(rawDiff);
+  float earthProximity = exp(-dist * dist * 16.0);
+  // Subtle wake behind Earth (rawDiff < 0) to convey prograde direction of travel
+  float wake = smoothstep(-1.15, 0.0, rawDiff) * step(rawDiff, 0.0) * 0.42;
+
+  // Front arc reads slightly crisper than far arc behind the Sun
+  float depthBoost = mix(1.15, 0.72, clamp((vDepth - 11.5) / 14.0, 0.0, 1.0));
+
+  vec3 baseCol = vec3(0.42, 0.62, 0.92);
+  vec3 activeCol = vec3(0.76, 0.92, 1.0);
+  vec3 col = mix(baseCol, activeCol, clamp(earthProximity * 0.9 + wake * 0.55, 0.0, 1.0));
+
+  float lineStrength = (core * 0.55 + glow) * (0.58 + 0.95 * earthProximity + wake) * depthBoost;
+  float alpha = clamp(lineStrength * uOpacity, 0.0, 1.0);
+  if (alpha < 0.004) discard;
+  gl_FragColor = vec4(col * (0.9 + 0.45 * earthProximity), alpha);
+}
+`;
+
+export const orbitMarkerVertexShader = /* glsl */ `
+attribute float aMonthIndex;
+attribute float aSeasonal;
+
+uniform float uPixelRatio;
+uniform float uActiveMonth;
+
+varying float vActive;
+varying float vSeasonal;
+varying float vDepth;
+
+void main() {
+  vActive = 1.0 - step(0.5, abs(aMonthIndex - uActiveMonth));
+  vSeasonal = aSeasonal;
+  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+  vDepth = -mvPosition.z;
+
+  float depthScale = clamp(18.0 / max(vDepth, 4.0), 0.72, 1.38);
+  float baseSize = mix(4.2, 6.0, aSeasonal);
+  float size = mix(baseSize, 8.8, vActive) * depthScale * uPixelRatio;
+  gl_PointSize = clamp(size, 2.5 * uPixelRatio, 14.0 * uPixelRatio);
+  gl_Position = projectionMatrix * mvPosition;
+}
+`;
+
+export const orbitMarkerFragmentShader = /* glsl */ `
+uniform float uOpacity;
+
+varying float vActive;
+varying float vSeasonal;
+varying float vDepth;
+
+void main() {
+  vec2 c = gl_PointCoord * 2.0 - 1.0;
+  float r = length(c);
+  if (r > 1.0) discard;
+
+  float core = exp(-r * r * 14.0);
+  float halo = exp(-r * 3.4) * mix(0.28, 0.62, vActive);
+  float depthFade = mix(1.05, 0.68, clamp((vDepth - 11.5) / 14.0, 0.0, 1.0));
+
+  vec3 regularCol = vec3(0.58, 0.74, 0.96);
+  vec3 seasonalCol = vec3(0.84, 0.91, 1.0);
+  vec3 activeCol = vec3(0.82, 0.96, 1.0);
+  vec3 col = mix(mix(regularCol, seasonalCol, vSeasonal), activeCol, vActive);
+
+  float intensity = (core * mix(0.75, 1.25, vActive) + halo) * depthFade;
+  float alpha = clamp(intensity * mix(0.62, 1.0, max(vSeasonal * 0.5, vActive)) * uOpacity, 0.0, 1.0);
+  if (alpha < 0.004) discard;
+  gl_FragColor = vec4(col, alpha);
+}
+`;
+
+export const orbitRadialVertexShader = /* glsl */ `
+attribute float aAlong;
+
+varying float vAlong;
+
+void main() {
+  vAlong = aAlong;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}
+`;
+
+export const orbitRadialFragmentShader = /* glsl */ `
+uniform float uOpacity;
+
+varying float vAlong;
+
+void main() {
+  // Smoothly fade near the Sun (0.0) and near Earth (1.0) so the guide line stays whisper-clean
+  float ends = smoothstep(0.0, 0.22, vAlong) * smoothstep(1.0, 0.78, vAlong);
+  vec3 col = mix(vec3(1.0, 0.84, 0.56), vec3(0.54, 0.78, 1.0), vAlong);
+  float alpha = ends * 0.26 * uOpacity;
+  if (alpha < 0.003) discard;
+  gl_FragColor = vec4(col, alpha);
 }
 `;
