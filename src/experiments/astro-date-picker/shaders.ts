@@ -234,7 +234,7 @@ void main() {
 
   vec3 albedo = texture2D(uMoonMap, vUv).rgb;
 
-  vec2 texel = vec2(1.0 / 2048.0, 1.0 / 1024.0);
+  vec2 texel = vec2(1.0 / 1024.0, 1.0 / 512.0);
   float hL = luma(texture2D(uMoonMap, vUv - vec2(texel.x, 0.0)).rgb);
   float hR = luma(texture2D(uMoonMap, vUv + vec2(texel.x, 0.0)).rgb);
   float hD = luma(texture2D(uMoonMap, vUv - vec2(0.0, texel.y)).rgb);
@@ -1224,26 +1224,42 @@ void main() {
 
 export const galacticGuideVertexShader = /* glsl */ `
 varying vec2 vUv;
+varying vec3 vWorldPos;
 
 void main() {
   vUv = uv;
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+  vWorldPos = worldPosition.xyz;
+  gl_Position = projectionMatrix * viewMatrix * worldPosition;
 }
 `;
 
 export const galacticGuideFragmentShader = /* glsl */ `
 uniform float uOpacity;
 uniform float uDrift;
+uniform vec3 uSunPos;
+uniform float uSunRadius;
 
 varying vec2 vUv;
+varying vec3 vWorldPos;
 
 void main() {
   float across = abs(vUv.y - 0.5) * 2.0;
   float fwY = max(length(vec2(dFdx(vUv.y), dFdy(vUv.y))) * 2.0, 0.001);
 
   float absAlong = abs(vUv.x);
-  float sunClear = smoothstep(0.18, 0.5, absAlong);
+  vec3 toSun = uSunPos - cameraPosition;
+  vec3 toFrag = vWorldPos - cameraPosition;
+  float distSun = length(toSun);
+  float sunAngR = asin(clamp(uSunRadius / max(distSun, uSunRadius + 0.001), 0.0, 0.9999));
+  vec3 dirSun = toSun / max(distSun, 1e-5);
+  vec3 dirFrag = normalize(toFrag);
+  float sepAng = atan(length(cross(dirSun, dirFrag)), dot(dirSun, dirFrag));
+  float screenRadii = sepAng / max(sunAngR, 1e-5);
+  // Crisp clearance gap right outside the Sun's bright core, matching the Lunar guide
+  float sunClear = smoothstep(1.30, 1.88, screenRadii);
   float endFade = smoothstep(5.4, 1.7, absAlong);
+  if (sunClear * endFade < 0.002) discard;
 
   float hairline = 1.0 - smoothstep(fwY * 0.5, fwY * 1.5, across);
 

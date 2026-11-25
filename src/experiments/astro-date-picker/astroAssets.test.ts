@@ -76,10 +76,10 @@ describe("astroAssets", () => {
   it("resolves URLs for every astro texture", () => {
     const urls = getAstroTextureUrls();
     expect(Object.keys(urls)).toHaveLength(ASTRO_TEXTURE_KEYS.length);
-    expect(urls.earthDay).toMatch(/\/textures\/astro\/earth_day\.jpg$/);
-    expect(urls.moonAlbedo).toMatch(/\/textures\/astro\/moon_albedo\.jpg$/);
-    expect(urls.milkyWay).toMatch(/\/textures\/astro\/milky_way\.jpg$/);
-    expect(urls.sunSurface).toMatch(/\/textures\/astro\/sun_surface\.jpg$/);
+    expect(urls.earthDay).toMatch(/\/textures\/astro\/earth_day\.webp$/);
+    expect(urls.moonAlbedo).toMatch(/\/textures\/astro\/moon_albedo\.webp$/);
+    expect(urls.milkyWay).toMatch(/\/textures\/astro\/milky_way\.webp$/);
+    expect(urls.sunSurface).toMatch(/\/textures\/astro\/sun_surface\.webp$/);
   });
 
   it("preloads and deduplicates all textures while reporting progress", async () => {

@@ -15,6 +15,7 @@ import {
 import { BRIGHT_STARS, bvToRgb } from "./starCatalog";
 
 export const EARTH_ORBIT_RADIUS = 6.2;
+export const SUN_BASE_RADIUS = 0.72;
 export const MEAN_LUNAR_DISTANCE_KM = 384400;
 export const MOON_PHYSICAL_RADIUS = 0.2725;
 export const HERO_MOON_ORBIT_RADIUS = 3.2;
@@ -358,6 +359,8 @@ export function createGalacticGuide(collector: SceneResourceCollector) {
   const uniforms = {
     uOpacity: { value: 0 },
     uDrift: { value: 0 },
+    uSunPos: { value: new THREE.Vector3(0, 0, 0) },
+    uSunRadius: { value: SUN_BASE_RADIUS * 0.34 },
   };
 
   const material = new THREE.ShaderMaterial({

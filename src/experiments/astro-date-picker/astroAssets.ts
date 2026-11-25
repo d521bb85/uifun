@@ -1,12 +1,12 @@
 export const ASTRO_TEXTURE_SPECS = {
-  earthDay: { file: "earth_day.jpg", srgb: true },
-  earthNight: { file: "earth_night.jpg", srgb: true },
-  earthClouds: { file: "earth_clouds.jpg", srgb: false },
-  earthSpecular: { file: "earth_specular.jpg", srgb: false },
-  earthNormal: { file: "earth_normal.jpg", srgb: false },
-  moonAlbedo: { file: "moon_albedo.jpg", srgb: true },
-  milkyWay: { file: "milky_way.jpg", srgb: true },
-  sunSurface: { file: "sun_surface.jpg", srgb: true },
+  earthDay: { file: "earth_day.webp", srgb: true },
+  earthNight: { file: "earth_night.webp", srgb: true },
+  earthClouds: { file: "earth_clouds.webp", srgb: false },
+  earthSpecular: { file: "earth_specular.webp", srgb: false },
+  earthNormal: { file: "earth_normal.webp", srgb: false },
+  moonAlbedo: { file: "moon_albedo.webp", srgb: true },
+  milkyWay: { file: "milky_way.webp", srgb: true },
+  sunSurface: { file: "sun_surface.webp", srgb: true },
 } as const;
 
 export type AstroTextureKey = keyof typeof ASTRO_TEXTURE_SPECS;

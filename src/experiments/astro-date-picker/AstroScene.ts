@@ -41,6 +41,7 @@ import {
   MOON_ORBIT_DRIFT_ACCEL,
   MOON_ORBIT_DRIFT_SPEED,
   MOON_PHYSICAL_RADIUS,
+  SUN_BASE_RADIUS,
   TIDE_ARRIVAL_BAND,
   TIDE_DRIFT_ACCEL,
   TIDE_DRIFT_SPEED,
@@ -197,6 +198,8 @@ export class AstroSceneRenderer {
   private readonly galacticGuideUniforms: {
     uOpacity: { value: number };
     uDrift: { value: number };
+    uSunPos: { value: THREE.Vector3 };
+    uSunRadius: { value: number };
   };
 
   private readonly sunGroup: THREE.Group;
@@ -668,7 +671,7 @@ export class AstroSceneRenderer {
     this.scene.add(this.yearStageGroup);
 
     this.sunGroup = new THREE.Group();
-    const sunGeo = new THREE.SphereGeometry(0.72, 48, 48);
+    const sunGeo = new THREE.SphereGeometry(SUN_BASE_RADIUS, 48, 48);
     this.geometries.push(sunGeo);
     this.sunUniforms = {
       uSunMap: { value: sunSurfaceMap },
@@ -1964,6 +1967,8 @@ export class AstroSceneRenderer {
 
     this.galacticGuideUniforms.uOpacity.value = this.wYearGuide;
     this.galacticGuideUniforms.uDrift.value = this.galacticDustUniforms.uDrift.value;
+    this.galacticGuideUniforms.uSunPos.value.copy(this.sunGroup.position);
+    this.galacticGuideUniforms.uSunRadius.value = SUN_BASE_RADIUS * this.smoothSunScale;
     this.galacticGuideMesh.visible = this.wYearGuide > 0.005;
 
     this.skyMesh.visible = this.wYearSky < 0.995;
