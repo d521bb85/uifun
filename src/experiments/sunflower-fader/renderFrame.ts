@@ -12,13 +12,6 @@ import {
   type SunflowerSimState,
 } from "./types";
 
-interface CachedPatterns {
-  paper: CanvasPattern | null;
-  hatch: CanvasPattern | null;
-  pastel: CanvasPattern | null;
-}
-
-const patternCache = new WeakMap<CanvasRenderingContext2D, CachedPatterns>();
 let cachedCardPath: Path2D | null = null;
 let cachedBottomGuardPath: Path2D | null = null;
 
@@ -65,20 +58,6 @@ function getBottomGuardPath(): Path2D {
   return cachedBottomGuardPath;
 }
 
-function getPatterns(ctx: CanvasRenderingContext2D): CachedPatterns {
-  const existing = patternCache.get(ctx);
-  if (existing) return existing;
-
-  const { paperTile, pencilHatchTile, pastelGrainTile } = getPaperTextures();
-  const patterns: CachedPatterns = {
-    paper: paperTile.width ? ctx.createPattern(paperTile, "repeat") : null,
-    hatch: pencilHatchTile.width ? ctx.createPattern(pencilHatchTile, "repeat") : null,
-    pastel: pastelGrainTile.width ? ctx.createPattern(pastelGrainTile, "repeat") : null,
-  };
-  patternCache.set(ctx, patterns);
-  return patterns;
-}
-
 export function renderSunflowerFrame(
   ctx: CanvasRenderingContext2D,
   state: SunflowerSimState,
@@ -94,7 +73,7 @@ export function renderSunflowerFrame(
   const palette = getPalette(state.phases);
   const cardPath = getCardPath();
   const bottomGuardPath = getBottomGuardPath();
-  const patterns = getPatterns(ctx);
+  const { cardFinishTexture } = getPaperTextures();
 
   // Subtle natural paper elevation shadow beneath the card (NO border stroke!)
   ctx.save();
@@ -128,30 +107,10 @@ export function renderSunflowerFrame(
   paintMeadowLayer(ctx, state, palette, "front");
   paintAirborneLife(ctx, state, palette);
 
-  if (patterns.paper) {
+  if (cardFinishTexture.width) {
     ctx.save();
     ctx.globalCompositeOperation = "multiply";
-    ctx.globalAlpha = 0.4;
-    ctx.fillStyle = patterns.paper;
-    ctx.fillRect(BLEED_X, BLEED_Y, CARD_WIDTH, CARD_HEIGHT);
-    ctx.restore();
-  }
-
-  if (patterns.pastel) {
-    ctx.save();
-    ctx.globalCompositeOperation = "multiply";
-    ctx.globalAlpha = 0.16;
-    ctx.fillStyle = patterns.pastel;
-    ctx.fillRect(BLEED_X, BLEED_Y, CARD_WIDTH, CARD_HEIGHT);
-    ctx.restore();
-  }
-
-  if (patterns.hatch) {
-    ctx.save();
-    ctx.globalCompositeOperation = "multiply";
-    ctx.globalAlpha = 0.11;
-    ctx.fillStyle = patterns.hatch;
-    ctx.fillRect(BLEED_X, BLEED_Y, CARD_WIDTH, CARD_HEIGHT);
+    ctx.drawImage(cardFinishTexture, BLEED_X, BLEED_Y, CARD_WIDTH, CARD_HEIGHT);
     ctx.restore();
   }
   ctx.restore();

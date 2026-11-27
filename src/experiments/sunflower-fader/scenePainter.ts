@@ -74,6 +74,132 @@ const GROUND_TUFTS: readonly GroundTuft[] = (() => {
 
 const pastelPatternCache = new WeakMap<CanvasRenderingContext2D, CanvasPattern | null>();
 
+interface CloudPuffSpec {
+  frac: number;
+  dxJitter: number;
+  dyJitter: number;
+  rxMul: number;
+  ryMul: number;
+  rot: number;
+  useWarmUnder: boolean;
+}
+
+const cloudPuffCache = new Map<number, readonly CloudPuffSpec[]>();
+
+function getCloudPuffs(seed: number): readonly CloudPuffSpec[] {
+  const existing = cloudPuffCache.get(seed);
+  if (existing) return existing;
+
+  const rng = mulberry32(seed);
+  const puffCount = 8;
+  const puffs: CloudPuffSpec[] = [];
+  for (let p = 0; p < puffCount; p++) {
+    const frac = p / (puffCount - 1) - 0.5;
+    puffs.push({
+      frac,
+      dxJitter: (rng() - 0.5) * 16,
+      dyJitter: (rng() - 0.5) * 0.46,
+      rxMul: 0.24 + rng() * 0.24,
+      ryMul: 0.3 + rng() * 0.26,
+      rot: (rng() - 0.5) * 0.16,
+      useWarmUnder: p % 3 === 0,
+    });
+  }
+  cloudPuffCache.set(seed, puffs);
+  return puffs;
+}
+
+interface SkyBackdropCache {
+  canvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+  value: number;
+}
+
+let skyBackdropCache: SkyBackdropCache | null = null;
+
+function paintSkyBackdropInto(
+  ctx: CanvasRenderingContext2D,
+  offsetX: number,
+  offsetY: number,
+  warmth: number,
+  palette: SunflowerPalette,
+): void {
+  const skyGrad = ctx.createLinearGradient(0, offsetY, 0, offsetY + CARD_HEIGHT);
+  skyGrad.addColorStop(0, rgbToCss(palette.skyTop));
+  skyGrad.addColorStop(0.42, rgbToCss(palette.skyMid));
+  skyGrad.addColorStop(0.76, rgbToCss(palette.skyHorizon));
+  skyGrad.addColorStop(1, rgbToCss(lerpRgb(palette.skyHorizon, palette.paperBg, 0.26)));
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(offsetX, offsetY, CARD_WIDTH, CARD_HEIGHT);
+
+  const overcastWeight = 1 - warmth;
+  for (let i = 0; i < SKY_PATCHES.length; i++) {
+    const p = SKY_PATCHES[i];
+    if (!p) continue;
+    const base = sampleSkyColor(palette, p.yFrac);
+    const target =
+      p.shade > 0
+        ? lerpRgb(base, palette.paperBg, 0.44)
+        : lerpRgb(base, palette.outlineInk, 0.1 + overcastWeight * 0.08);
+    const patchAlpha = p.alpha * (0.7 + overcastWeight * p.dryBias * 0.65);
+
+    const cx = offsetX + p.xFrac * CARD_WIDTH;
+    const cy = offsetY + p.yFrac * CARD_HEIGHT;
+    const rx = p.rxFrac * CARD_WIDTH;
+    const ry = p.ryFrac * CARD_HEIGHT;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(p.tilt);
+    ctx.scale(1, ry / Math.max(rx, 1));
+    const grad = ctx.createRadialGradient(0, 0, rx * 0.08, 0, 0, rx);
+    grad.addColorStop(0, rgbToCss(target, patchAlpha));
+    grad.addColorStop(0.58, rgbToCss(target, patchAlpha * 0.42));
+    grad.addColorStop(1, rgbToCss(target, 0));
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(0, 0, rx, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  const { skyPencilTexture } = getPaperTextures();
+  if (skyPencilTexture.width) {
+    ctx.save();
+    ctx.globalCompositeOperation = "multiply";
+    ctx.globalAlpha = lerp(0.88, 0.48, warmth);
+    ctx.drawImage(skyPencilTexture, offsetX, offsetY, CARD_WIDTH, CARD_HEIGHT);
+    ctx.restore();
+  }
+}
+
+function getCachedSkyBackdrop(
+  displayValue: number,
+  warmth: number,
+  palette: SunflowerPalette,
+): HTMLCanvasElement | null {
+  if (typeof document === "undefined") return null;
+  if (!skyBackdropCache) {
+    const canvas = document.createElement("canvas");
+    canvas.width = CARD_WIDTH * 2;
+    canvas.height = CARD_HEIGHT * 2;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    skyBackdropCache = { canvas, ctx, value: -1 };
+  }
+
+  if (skyBackdropCache.value < 0 || Math.abs(displayValue - skyBackdropCache.value) > 0.2) {
+    const { ctx } = skyBackdropCache;
+    ctx.save();
+    ctx.setTransform(2, 0, 0, 2, 0, 0);
+    paintSkyBackdropInto(ctx, 0, 0, warmth, palette);
+    ctx.restore();
+    skyBackdropCache.value = displayValue;
+  }
+
+  return skyBackdropCache.canvas;
+}
+
 function getPastelPattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
   if (pastelPatternCache.has(ctx)) {
     return pastelPatternCache.get(ctx) ?? null;
@@ -101,57 +227,11 @@ export function paintSkyAndAtmosphere(
 ): void {
   const { phases, clouds } = state;
 
-  // Base powdery pastel wash
-  const skyGrad = ctx.createLinearGradient(0, BLEED_Y, 0, BLEED_Y + CARD_HEIGHT);
-  skyGrad.addColorStop(0, rgbToCss(palette.skyTop));
-  skyGrad.addColorStop(0.42, rgbToCss(palette.skyMid));
-  skyGrad.addColorStop(0.76, rgbToCss(palette.skyHorizon));
-  skyGrad.addColorStop(1, rgbToCss(lerpRgb(palette.skyHorizon, palette.paperBg, 0.26)));
-  ctx.fillStyle = skyGrad;
-  ctx.fillRect(BLEED_X, BLEED_Y, CARD_WIDTH, CARD_HEIGHT);
-
-  // Soft hand-rubbed pastel mottling bands across the sky
-  const overcastWeight = 1 - phases.warmth;
-  ctx.save();
-  for (let i = 0; i < SKY_PATCHES.length; i++) {
-    const p = SKY_PATCHES[i];
-    if (!p) continue;
-    const base = sampleSkyColor(palette, p.yFrac);
-    const target =
-      p.shade > 0
-        ? lerpRgb(base, palette.paperBg, 0.44)
-        : lerpRgb(base, palette.outlineInk, 0.1 + overcastWeight * 0.08);
-    const patchAlpha = p.alpha * (0.7 + overcastWeight * p.dryBias * 0.65);
-
-    const cx = BLEED_X + p.xFrac * CARD_WIDTH;
-    const cy = BLEED_Y + p.yFrac * CARD_HEIGHT;
-    const rx = p.rxFrac * CARD_WIDTH;
-    const ry = p.ryFrac * CARD_HEIGHT;
-
-    ctx.save();
-    ctx.translate(cx, cy);
-    ctx.rotate(p.tilt);
-    ctx.scale(1, ry / Math.max(rx, 1));
-    const grad = ctx.createRadialGradient(0, 0, rx * 0.08, 0, 0, rx);
-    grad.addColorStop(0, rgbToCss(target, patchAlpha));
-    grad.addColorStop(0.58, rgbToCss(target, patchAlpha * 0.42));
-    grad.addColorStop(1, rgbToCss(target, 0));
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(0, 0, rx, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.restore();
-  }
-  ctx.restore();
-
-  // Pre-baked dry colored-pencil rubbing overlay (gives authentic horizontal sketchbook pencil texture!)
-  const { skyPencilTexture } = getPaperTextures();
-  if (skyPencilTexture.width) {
-    ctx.save();
-    ctx.globalCompositeOperation = "multiply";
-    ctx.globalAlpha = lerp(0.88, 0.48, phases.warmth);
-    ctx.drawImage(skyPencilTexture, BLEED_X, BLEED_Y, CARD_WIDTH, CARD_HEIGHT);
-    ctx.restore();
+  const skyBackdrop = getCachedSkyBackdrop(state.displayValue, phases.warmth, palette);
+  if (skyBackdrop) {
+    ctx.drawImage(skyBackdrop, BLEED_X, BLEED_Y, CARD_WIDTH, CARD_HEIGHT);
+  } else {
+    paintSkyBackdropInto(ctx, BLEED_X, BLEED_Y, phases.warmth, palette);
   }
 
   // Dreamy hand-rubbed pastel clouds (soft irregular chalky puffs, never crisp vector ovals)
@@ -160,23 +240,23 @@ export function paintSkyAndAtmosphere(
     const cloud = clouds[i];
     if (!cloud || cloud.opacity <= 0.02) continue;
 
-    const rng = mulberry32(cloud.seed);
-    const puffCount = 8;
+    const puffs = getCloudPuffs(cloud.seed);
     const baseAlpha = cloud.opacity * lerp(0.2, 0.44, phases.warmth);
     const warmUnder = lerpRgb(palette.cloudFill, palette.skyHorizon, 0.35);
 
-    for (let p = 0; p < puffCount; p++) {
-      const frac = p / (puffCount - 1) - 0.5;
-      const px = cloud.x + frac * cloud.width * 0.84 + (rng() - 0.5) * 16;
-      const py = cloud.y + (rng() - 0.5) * cloud.height * 0.46 - Math.abs(frac) * 2.5;
-      const rx = cloud.width * (0.24 + rng() * 0.24);
-      const ry = cloud.height * (0.3 + rng() * 0.26);
-      const puffAlpha = baseAlpha * (0.58 + (1 - Math.abs(frac) * 1.35) * 0.45);
-      const col = p % 3 === 0 ? warmUnder : palette.cloudFill;
+    for (let p = 0; p < puffs.length; p++) {
+      const puff = puffs[p];
+      if (!puff) continue;
+      const px = cloud.x + puff.frac * cloud.width * 0.84 + puff.dxJitter;
+      const py = cloud.y + puff.dyJitter * cloud.height - Math.abs(puff.frac) * 2.5;
+      const rx = cloud.width * puff.rxMul;
+      const ry = cloud.height * puff.ryMul;
+      const puffAlpha = baseAlpha * (0.58 + (1 - Math.abs(puff.frac) * 1.35) * 0.45);
+      const col = puff.useWarmUnder ? warmUnder : palette.cloudFill;
 
       ctx.save();
       ctx.translate(px, py);
-      ctx.rotate((rng() - 0.5) * 0.16);
+      ctx.rotate(puff.rot);
       ctx.scale(1, ry / Math.max(rx, 1));
       const cGrad = ctx.createRadialGradient(0, 0, rx * 0.05, 0, 0, rx);
       cGrad.addColorStop(0, rgbToCss(col, puffAlpha));

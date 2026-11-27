@@ -60,7 +60,7 @@ const formatPercent = (v: number) => `${Math.round(v)}%`;
 const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta"]);
 
 const CARD_FRAME_STYLE: CSSProperties = {
-  width: `min(${CARD_WIDTH}px, calc((100dvh - 132px) * ${CARD_WIDTH / CARD_HEIGHT}), calc(100vw - 104px))`,
+  width: `min(${CARD_WIDTH}px, max(120px, calc((100dvh - 132px) * ${CARD_WIDTH / CARD_HEIGHT})), calc(100vw - 104px))`,
   aspectRatio: `${CARD_WIDTH} / ${CARD_HEIGHT}`,
 };
 
@@ -111,9 +111,12 @@ export function SunflowerFader({
   const [uncontrolledValue, setUncontrolledValue] = useState(initialValue);
   const [hoveringHead, setHoveringHead] = useState(false);
   const [keyboardFocus, setKeyboardFocus] = useState(false);
+  const [reducedMotion, setReducedMotion] = useState(false);
+  const [pageVisible, setPageVisible] = useState(true);
 
   const activeValue = clamp(isControlled ? value : uncontrolledValue, 0, 100);
   const stageActive = useStageActive();
+  const animateLoop = stageActive && pageVisible && !reducedMotion;
 
   const frameRef = useRef<HTMLDivElement | null>(null);
   const controlRef = useRef<HTMLDivElement | null>(null);
@@ -127,20 +130,24 @@ export function SunflowerFader({
   const targetValueRef = useRef(activeValue);
   targetValueRef.current = activeValue;
 
-  const stageActiveRef = useRef(stageActive);
-  stageActiveRef.current = stageActive;
+  const animateLoopRef = useRef(animateLoop);
+  animateLoopRef.current = animateLoop;
 
   const pointerCanvasRef = useRef<Point2D | null>(null);
   const hoverHeadRef = useRef(false);
   const reducedMotionRef = useRef(false);
   const wheelAccumRef = useRef(0);
   const lastModalityRef = useRef<"keyboard" | "pointer">("pointer");
+  const lastHeadDxRef = useRef<string | null>(null);
 
   const syncHeadOffset = useCallback((sim: SunflowerSimState) => {
     const frameEl = frameRef.current;
     if (!frameEl) return;
     const { xPct } = getHeadNormalizedCardPos(sim.head);
-    frameEl.style.setProperty("--sunflower-head-dx", `${(xPct - 50).toFixed(2)}%`);
+    const quantized = `${(Math.round((xPct - 50) * 2) / 2).toFixed(1)}%`;
+    if (lastHeadDxRef.current === quantized) return;
+    lastHeadDxRef.current = quantized;
+    frameEl.style.setProperty("--sunflower-head-dx", quantized);
   }, []);
 
   const paintCanvas = useCallback(
@@ -163,7 +170,7 @@ export function SunflowerFader({
   );
 
   const paintSettledValue = useCallback(
-    (nextValue: number) => {
+    (nextValue: number, hoverHead = hoverHeadRef.current) => {
       const sim = simRef.current;
       if (!sim) return;
       sim.targetValue = nextValue;
@@ -172,7 +179,7 @@ export function SunflowerFader({
       stepSimState(sim, 0, {
         targetValue: nextValue,
         dragging: false,
-        hoverHead: hoverHeadRef.current,
+        hoverHead,
         pointerCanvas: pointerCanvasRef.current,
         reducedMotion: true,
       });
@@ -200,13 +207,42 @@ export function SunflowerFader({
         y: ((event.clientY - rect.top) / rect.height) * CANVAS_HEIGHT,
       };
     };
+    const onWindowPointerEnd = (event: globalThis.PointerEvent) => {
+      if (event.pointerType === "touch") {
+        pointerCanvasRef.current = null;
+        if (hoverHeadRef.current) {
+          hoverHeadRef.current = false;
+          setHoveringHead(false);
+        }
+        return;
+      }
+      const frameEl = frameRef.current;
+      if (!frameEl) return;
+      const rect = frameEl.getBoundingClientRect();
+      const inside =
+        event.clientX >= rect.left &&
+        event.clientX <= rect.right &&
+        event.clientY >= rect.top &&
+        event.clientY <= rect.bottom;
+      if (!inside) {
+        pointerCanvasRef.current = null;
+        if (hoverHeadRef.current) {
+          hoverHeadRef.current = false;
+          setHoveringHead(false);
+        }
+      }
+    };
     window.addEventListener("keydown", onWindowKeyDown, true);
     window.addEventListener("pointerdown", onWindowPointerDown, true);
     window.addEventListener("pointermove", onWindowPointerMove, true);
+    window.addEventListener("pointerup", onWindowPointerEnd, true);
+    window.addEventListener("pointercancel", onWindowPointerEnd, true);
     return () => {
       window.removeEventListener("keydown", onWindowKeyDown, true);
       window.removeEventListener("pointerdown", onWindowPointerDown, true);
       window.removeEventListener("pointermove", onWindowPointerMove, true);
+      window.removeEventListener("pointerup", onWindowPointerEnd, true);
+      window.removeEventListener("pointercancel", onWindowPointerEnd, true);
     };
   }, []);
 
@@ -216,18 +252,30 @@ export function SunflowerFader({
     }
     const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
     reducedMotionRef.current = mq.matches;
+    setReducedMotion(mq.matches);
     const onChange = (event: MediaQueryListEvent) => {
       reducedMotionRef.current = event.matches;
+      setReducedMotion(event.matches);
     };
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, []);
 
   useEffect(() => {
+    if (typeof document === "undefined") return;
+    const syncVisibility = () => {
+      setPageVisible(document.visibilityState !== "hidden");
+    };
+    syncVisibility();
+    document.addEventListener("visibilitychange", syncVisibility);
+    return () => document.removeEventListener("visibilitychange", syncVisibility);
+  }, []);
+
+  useEffect(() => {
     const sim = simRef.current;
     if (!sim) return;
 
-    if (!stageActive) {
+    if (!animateLoop) {
       paintSettledValue(targetValueRef.current);
       return;
     }
@@ -256,13 +304,13 @@ export function SunflowerFader({
 
     rafId = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(rafId);
-  }, [stageActive, paintCanvas, paintSettledValue]);
+  }, [animateLoop, paintCanvas, paintSettledValue]);
 
   useEffect(() => {
-    if (!stageActive) {
-      paintSettledValue(activeValue);
+    if (!animateLoop) {
+      paintSettledValue(activeValue, hoveringHead);
     }
-  }, [activeValue, stageActive, paintSettledValue]);
+  }, [activeValue, hoveringHead, animateLoop, paintSettledValue]);
 
   // Native non-passive wheel listener so preventDefault stops page scroll only over the card.
   useEffect(() => {
@@ -274,7 +322,12 @@ export function SunflowerFader({
       if (Math.abs(event.deltaY) < 0.01) return;
       event.preventDefault();
 
-      const raw = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
+      const raw =
+        event.deltaMode === 1
+          ? event.deltaY * 16
+          : event.deltaMode === 2
+            ? event.deltaY * 120
+            : event.deltaY;
       wheelAccumRef.current += -raw * 0.03;
 
       const wholeSteps = Math.trunc(wheelAccumRef.current);
@@ -304,7 +357,7 @@ export function SunflowerFader({
         setUncontrolledValue(next);
       }
       targetValueRef.current = next;
-      if (!stageActiveRef.current) {
+      if (!animateLoopRef.current) {
         paintSettledValue(next);
       }
     },
@@ -312,6 +365,9 @@ export function SunflowerFader({
   );
 
   const handlePointerMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    if (event.pointerType === "touch") return;
+    if (controlRef.current?.hasAttribute("data-dragging")) return;
+
     const canvas = canvasRef.current;
     const sim = simRef.current;
     if (!canvas || !sim) return;
@@ -345,7 +401,7 @@ export function SunflowerFader({
       if (disabled || readOnly) return;
       lastModalityRef.current = "pointer";
       setKeyboardFocus(false);
-      controller.setValue(tickValue, { event: event.nativeEvent });
+      controller.setValue(tickValue, { reason: "track-press", event: event.nativeEvent });
     },
     [controller, disabled, readOnly],
   );
@@ -387,7 +443,10 @@ export function SunflowerFader({
         <div
           aria-hidden="true"
           data-slot="scale"
-          className={cn("absolute right-[calc(100%+16px)] w-6", disabled && "opacity-45")}
+          className={cn(
+            "absolute right-[calc(100%+14px)] w-7 touch-manipulation [-webkit-tap-highlight-color:transparent]",
+            disabled && "opacity-45",
+          )}
           style={SLIDER_TRACK_BOUNDS_STYLE}
         >
           {SCALE_TICKS.map((tick) => (
@@ -399,12 +458,12 @@ export function SunflowerFader({
               data-tick={tick.tier}
               data-value={tick.value}
               style={{ top: `${100 - tick.value}%` }}
-              onPointerDown={(event) => {
+              onMouseDown={(event) => {
                 event.preventDefault();
               }}
               onClick={(event) => handleScaleTickClick(tick.value, event)}
               className={cn(
-                "group/tick absolute right-0 flex h-[5%] w-full -translate-y-1/2 items-center justify-end border-0 bg-transparent p-0 pr-1 outline-none",
+                "group/tick absolute right-0 flex h-[5%] w-full -translate-y-1/2 appearance-none items-center justify-end border-0 bg-transparent p-0 pr-1.5 outline-none",
                 disabled ? "cursor-not-allowed" : readOnly ? "cursor-default" : "cursor-pointer",
               )}
             >
@@ -460,7 +519,7 @@ export function SunflowerFader({
             }
           }}
           className={cn(
-            "absolute inset-0 block h-full w-full rounded-[18px] p-0 touch-none",
+            "absolute inset-0 block h-full w-full rounded-[18px] p-0 touch-none [-webkit-tap-highlight-color:transparent]",
             "data-[focus-keyboard]:outline-2 data-[focus-keyboard]:outline-offset-4 data-[focus-keyboard]:outline-muted",
             "data-dragging:cursor-grabbing data-disabled:cursor-not-allowed",
             hoveringHead ? "cursor-grab" : "cursor-pointer",

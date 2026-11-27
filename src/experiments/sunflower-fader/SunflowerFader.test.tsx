@@ -59,6 +59,8 @@ describe("SunflowerFader SSR & ui-sdk wiring", () => {
     const scaleInnerHtml = scaleMatch?.[1] ?? "";
 
     expect(scaleOpeningTag).toContain('aria-hidden="true"');
+    expect(scaleOpeningTag).toContain("touch-manipulation");
+    expect(scaleOpeningTag).toContain("[-webkit-tap-highlight-color:transparent]");
     expect(scaleOpeningTag).toContain(`top:${(HEAD_CARD_Y_MAX / CARD_HEIGHT) * 100}%`);
     expect(scaleOpeningTag).toContain(
       `bottom:${((CARD_HEIGHT - HEAD_CARD_Y_MIN) / CARD_HEIGHT) * 100}%`,

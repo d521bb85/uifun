@@ -541,29 +541,59 @@ function traceSmoothSpline(
   target: Path2D | CanvasRenderingContext2D,
   pts: readonly Point2D[],
   startWithMove: boolean,
+  yOffset = 0,
 ): void {
   const n = pts.length;
   const first = pts[0];
   if (n === 0 || !first) return;
   if (startWithMove) {
-    target.moveTo(first.x, first.y);
+    target.moveTo(first.x, first.y + yOffset);
   } else {
-    target.lineTo(first.x, first.y);
+    target.lineTo(first.x, first.y + yOffset);
   }
   if (n === 1) return;
   if (n === 2) {
     const second = pts[1];
-    if (second) target.lineTo(second.x, second.y);
+    if (second) target.lineTo(second.x, second.y + yOffset);
     return;
   }
   for (let i = 1; i < n - 1; i++) {
     const curr = pts[i];
     const next = pts[i + 1];
     if (!curr || !next) continue;
-    target.quadraticCurveTo(curr.x, curr.y, (curr.x + next.x) * 0.5, (curr.y + next.y) * 0.5);
+    target.quadraticCurveTo(
+      curr.x,
+      curr.y + yOffset,
+      (curr.x + next.x) * 0.5,
+      (curr.y + next.y) * 0.5 + yOffset,
+    );
   }
   const last = pts[n - 1];
-  if (last) target.lineTo(last.x, last.y);
+  if (last) target.lineTo(last.x, last.y + yOffset);
+}
+
+function traceSmoothSplineReverse(
+  target: Path2D | CanvasRenderingContext2D,
+  pts: readonly Point2D[],
+): void {
+  const n = pts.length;
+  const last = pts[n - 1];
+  if (n === 0 || !last) return;
+  target.lineTo(last.x, last.y);
+  if (n === 1) return;
+  if (n === 2) {
+    const first = pts[0];
+    if (first) target.lineTo(first.x, first.y);
+    return;
+  }
+  for (let i = n - 2; i >= 1; i--) {
+    const curr = pts[i];
+    const next = pts[i - 1];
+    if (!curr || !next) continue;
+    target.quadraticCurveTo(curr.x, curr.y, (curr.x + next.x) * 0.5, (curr.y + next.y) * 0.5);
+  }
+  const first = pts[0];
+  if (first) target.lineTo(first.x, first.y);
 }
 
 function drawStem(
@@ -605,10 +635,9 @@ function drawStem(
   const lastRight = rightPts[rightPts.length - 1];
   if (!firstLeft || !lastRight) return;
 
-  const reversedRight = [...rightPts].reverse();
   const stemPath = new Path2D();
   traceSmoothSpline(stemPath, leftPts, true);
-  traceSmoothSpline(stemPath, reversedRight, false);
+  traceSmoothSplineReverse(stemPath, rightPts);
   stemPath.closePath();
 
   const firstNode = stem[0];
@@ -660,6 +689,7 @@ function drawStem(
   // Fine longitudinal colored-pencil fiber lines
   ctx.strokeStyle = rgbToCss(palette.stemOutline, 0.2);
   ctx.lineWidth = 0.55;
+  ctx.beginPath();
   for (const f of [-0.36, 0.16, 0.52] as const) {
     const fiberPts: Point2D[] = [];
     for (let i = 0; i < stem.length; i++) {
@@ -672,15 +702,15 @@ function drawStem(
         y: node.y + ny * node.radius * f,
       });
     }
-    ctx.beginPath();
     traceSmoothSpline(ctx, fiberPts, true);
-    ctx.stroke();
   }
+  ctx.stroke();
 
   // Delicate diagonal colored-pencil shadow hatching along shaded right side
   ctx.strokeStyle = rgbToCss(palette.stemOutline, 0.22);
   ctx.lineWidth = 0.52;
   const hatchStep = Math.max(2, Math.floor(stem.length / 20));
+  ctx.beginPath();
   for (let i = 2; i < stem.length - 1; i += hatchStep) {
     const node = stem[i];
     if (!node) continue;
@@ -688,14 +718,13 @@ function drawStem(
     const ny = node.tx;
     const px = node.x + nx * node.radius * 0.08;
     const py = node.y + ny * node.radius * 0.08;
-    ctx.beginPath();
     ctx.moveTo(px, py);
     ctx.lineTo(
       px + nx * node.radius * 0.94 - node.tx * 2.5,
       py + ny * node.radius * 0.94 - node.ty * 2.5,
     );
-    ctx.stroke();
   }
+  ctx.stroke();
   ctx.restore();
 
   // Whisper-thin sepia-olive colored-pencil edges (NO thick black outlines!)
@@ -1019,70 +1048,77 @@ function drawLeaf(
   // Rich directional colored-pencil hatching strokes following natural lateral vein sweep
   const hatchCount = 30;
   ctx.lineCap = "round";
-  for (let h = 1; h < hatchCount; h++) {
-    const t = h / hatchCount;
-    const idx = Math.min(midrib.length - 1, Math.floor(t * (midrib.length - 1)));
-    const mp = midrib[idx];
-    if (!mp) continue;
 
-    const span = leaf.width * (0.52 * Math.sin(t ** 0.76 * Math.PI) + 0.12);
-    const sweepFwd = span * 0.44;
-    const isStrong = h % 3 === 0;
-
-    // Deep mossy-forest colored-pencil hatching on shaded lower half
+  for (const strongPass of [false, true] as const) {
     ctx.strokeStyle = rgbToCss(
       shadowCol,
-      isStrong ? lerp(0.32, 0.38, vitality) : lerp(0.2, 0.24, vitality),
+      strongPass ? lerp(0.32, 0.38, vitality) : lerp(0.2, 0.24, vitality),
     );
-    ctx.lineWidth = isStrong ? 0.8 : 0.58;
+    ctx.lineWidth = strongPass ? 0.8 : 0.58;
     ctx.beginPath();
-    ctx.moveTo(mp.x - 0.5, mp.y);
-    ctx.quadraticCurveTo(
-      mp.x + sweepFwd * 0.48,
-      mp.y - upperSide * span * 0.56,
-      mp.x + sweepFwd,
-      mp.y - upperSide * span * 0.96,
-    );
-    ctx.stroke();
+    for (let h = 1; h < hatchCount; h++) {
+      if ((h % 3 === 0) !== strongPass) continue;
+      const t = h / hatchCount;
+      const idx = Math.min(midrib.length - 1, Math.floor(t * (midrib.length - 1)));
+      const mp = midrib[idx];
+      if (!mp) continue;
 
-    // Sunlit upper-cheek chartreuse-cream & mid-sage pencil striations
-    ctx.strokeStyle =
-      h % 2 === 0
-        ? rgbToCss(lerpRgb(hiCol, palette.paperBg, 0.18), lerp(0.24, 0.34, vitality))
-        : rgbToCss(lerpRgb(baseCol, shadowCol, 0.42), 0.16);
-    ctx.lineWidth = h % 2 === 0 ? 0.68 : 0.52;
+      const span = leaf.width * (0.52 * Math.sin(t ** 0.76 * Math.PI) + 0.12);
+      const sweepFwd = span * 0.44;
+      ctx.moveTo(mp.x - 0.5, mp.y);
+      ctx.quadraticCurveTo(
+        mp.x + sweepFwd * 0.48,
+        mp.y - upperSide * span * 0.56,
+        mp.x + sweepFwd,
+        mp.y - upperSide * span * 0.96,
+      );
+    }
+    ctx.stroke();
+  }
+
+  for (const evenPass of [true, false] as const) {
+    ctx.strokeStyle = evenPass
+      ? rgbToCss(lerpRgb(hiCol, palette.paperBg, 0.18), lerp(0.24, 0.34, vitality))
+      : rgbToCss(lerpRgb(baseCol, shadowCol, 0.42), 0.16);
+    ctx.lineWidth = evenPass ? 0.68 : 0.52;
     ctx.beginPath();
-    ctx.moveTo(mp.x + 0.8, mp.y);
-    ctx.quadraticCurveTo(
-      mp.x + sweepFwd * 0.45,
-      mp.y + upperSide * span * 0.52,
-      mp.x + sweepFwd * 0.92,
-      mp.y + upperSide * span * 0.92,
-    );
+    for (let h = 1; h < hatchCount; h++) {
+      if ((h % 2 === 0) !== evenPass) continue;
+      const t = h / hatchCount;
+      const idx = Math.min(midrib.length - 1, Math.floor(t * (midrib.length - 1)));
+      const mp = midrib[idx];
+      if (!mp) continue;
+
+      const span = leaf.width * (0.52 * Math.sin(t ** 0.76 * Math.PI) + 0.12);
+      const sweepFwd = span * 0.44;
+      ctx.moveTo(mp.x + 0.8, mp.y);
+      ctx.quadraticCurveTo(
+        mp.x + sweepFwd * 0.45,
+        mp.y + upperSide * span * 0.52,
+        mp.x + sweepFwd * 0.92,
+        mp.y + upperSide * span * 0.92,
+      );
+    }
     ctx.stroke();
   }
 
   // Delicate cross-hatch strokes tucked in the shaded basal cleft for book-illustration depth
   ctx.strokeStyle = rgbToCss(shadowCol, 0.24);
   ctx.lineWidth = 0.52;
+  ctx.beginPath();
   for (let c = 0; c < 6; c++) {
     const cx0 = -leaf.length * 0.06 + c * (leaf.length * 0.055);
-    ctx.beginPath();
     ctx.moveTo(cx0, upperSide * leaf.width * 0.14);
     ctx.lineTo(cx0 + leaf.length * 0.08, -upperSide * leaf.width * 0.34);
-    ctx.stroke();
   }
+  ctx.stroke();
 
   // Soft pale-chartreuse midrib vein (with sculpted mossy shadow tuck alongside, strictly clipped inside blade!)
   ctx.strokeStyle = rgbToCss(shadowCol, 0.42);
   ctx.lineWidth = lerp(1.1, 2.0, leaf.turgor);
   ctx.lineCap = "round";
   ctx.beginPath();
-  traceSmoothSpline(
-    ctx,
-    midrib.map((p) => ({ x: p.x, y: p.y - upperSide * 0.8 })),
-    true,
-  );
+  traceSmoothSpline(ctx, midrib, true, -upperSide * 0.8);
   ctx.stroke();
 
   ctx.strokeStyle = rgbToCss(
@@ -1097,11 +1133,11 @@ function drawLeaf(
   // Delicate basal heart-lobe veins & curved pinnate lateral veins (pale vein + whisper shadow tuck)
   const cordate = 1 - leaf.curl;
   if (cordate > 0.2 && m0) {
+    ctx.strokeStyle = rgbToCss(shadowCol, 0.24);
+    ctx.lineWidth = 0.75;
+    ctx.beginPath();
     for (const dir of [-1, 1] as const) {
       const lobeScale = dir === upperSide ? topScale : botScale;
-      ctx.strokeStyle = rgbToCss(shadowCol, 0.24);
-      ctx.lineWidth = 0.75;
-      ctx.beginPath();
       ctx.moveTo(m0.x + 2, m0.y + 0.6);
       ctx.quadraticCurveTo(
         -leaf.length * 0.04 * cordate,
@@ -1109,11 +1145,14 @@ function drawLeaf(
         leaf.length * 0.15,
         dir * leaf.width * 0.4 * lobeScale + 0.6,
       );
-      ctx.stroke();
+    }
+    ctx.stroke();
 
-      ctx.strokeStyle = rgbToCss(lerpRgb(palette.leafVein, hiCol, 0.35), 0.56);
-      ctx.lineWidth = 0.58;
-      ctx.beginPath();
+    ctx.strokeStyle = rgbToCss(lerpRgb(palette.leafVein, hiCol, 0.35), 0.56);
+    ctx.lineWidth = 0.58;
+    ctx.beginPath();
+    for (const dir of [-1, 1] as const) {
+      const lobeScale = dir === upperSide ? topScale : botScale;
       ctx.moveTo(m0.x + 2, m0.y);
       ctx.quadraticCurveTo(
         -leaf.length * 0.04 * cordate,
@@ -1121,40 +1160,37 @@ function drawLeaf(
         leaf.length * 0.15,
         dir * leaf.width * 0.4 * lobeScale,
       );
-      ctx.stroke();
     }
+    ctx.stroke();
   }
 
   const veinCount = 5;
-  for (let v = 1; v <= veinCount; v++) {
-    const frac = v / (veinCount + 1);
-    const idx = Math.min(midrib.length - 1, Math.floor(frac * (midrib.length - 1)));
-    const mp = midrib[idx];
-    if (!mp) continue;
-    const reach = leaf.width * 0.44 * Math.sin(frac ** 0.72 * Math.PI);
-    const fwd = leaf.length * (0.14 + 0.05 * (1 - frac));
+  for (const shadowPass of [true, false] as const) {
+    ctx.strokeStyle = shadowPass
+      ? rgbToCss(shadowCol, 0.22)
+      : rgbToCss(lerpRgb(palette.leafVein, hiCol, 0.25), 0.54);
+    ctx.lineWidth = shadowPass ? 0.7 : 0.56;
+    const dy = shadowPass ? 0.55 : 0;
+    ctx.beginPath();
+    for (let v = 1; v <= veinCount; v++) {
+      const frac = v / (veinCount + 1);
+      const idx = Math.min(midrib.length - 1, Math.floor(frac * (midrib.length - 1)));
+      const mp = midrib[idx];
+      if (!mp) continue;
+      const reach = leaf.width * 0.44 * Math.sin(frac ** 0.72 * Math.PI);
+      const fwd = leaf.length * (0.14 + 0.05 * (1 - frac));
 
-    for (const dir of [-1, 1] as const) {
-      const scaleDir = dir === upperSide ? topScale : botScale;
-      const ex = mp.x + fwd;
-      const ey = mp.y + dir * reach * scaleDir;
-      const qx = mp.x + fwd * 0.44;
-      const qy = mp.y + dir * reach * scaleDir * 0.72;
-
-      ctx.strokeStyle = rgbToCss(shadowCol, 0.22);
-      ctx.lineWidth = 0.7;
-      ctx.beginPath();
-      ctx.moveTo(mp.x, mp.y + 0.55);
-      ctx.quadraticCurveTo(qx, qy + 0.55, ex, ey + 0.55);
-      ctx.stroke();
-
-      ctx.strokeStyle = rgbToCss(lerpRgb(palette.leafVein, hiCol, 0.25), 0.54);
-      ctx.lineWidth = 0.56;
-      ctx.beginPath();
-      ctx.moveTo(mp.x, mp.y);
-      ctx.quadraticCurveTo(qx, qy, ex, ey);
-      ctx.stroke();
+      for (const dir of [-1, 1] as const) {
+        const scaleDir = dir === upperSide ? topScale : botScale;
+        const ex = mp.x + fwd;
+        const ey = mp.y + dir * reach * scaleDir;
+        const qx = mp.x + fwd * 0.44;
+        const qy = mp.y + dir * reach * scaleDir * 0.72;
+        ctx.moveTo(mp.x, mp.y + dy);
+        ctx.quadraticCurveTo(qx, qy + dy, ex, ey + dy);
+      }
     }
+    ctx.stroke();
   }
   ctx.restore();
 

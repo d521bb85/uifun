@@ -1,3 +1,4 @@
+import { mulberry32 } from "./colorAndCurves";
 import { CARD_HEIGHT, CARD_WIDTH } from "./types";
 
 export interface PaperTextures {
@@ -5,7 +6,7 @@ export interface PaperTextures {
   pencilHatchTile: HTMLCanvasElement;
   pastelGrainTile: HTMLCanvasElement;
   skyPencilTexture: HTMLCanvasElement;
-  stagePaperDataUrl: string;
+  cardFinishTexture: HTMLCanvasElement;
 }
 
 let cachedTextures: PaperTextures | null = null;
@@ -42,16 +43,6 @@ function clampByte(v: number): number {
   if (v < 0) return 0;
   if (v > 255) return 255;
   return v | 0;
-}
-
-function createPrng(seed: number): () => number {
-  let s = seed >>> 0;
-  return () => {
-    s = (s + 0x6d2b79f5) | 0;
-    let t = Math.imul(s ^ (s >>> 15), 1 | s);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
 }
 
 function createColdPressPaperTile(size: number): HTMLCanvasElement {
@@ -103,7 +94,7 @@ function createColdPressPaperTile(size: number): HTMLCanvasElement {
   ctx.putImageData(image, 0, 0);
 
   // Subtle cotton fibers and warm organic flecks wrapped seamlessly
-  const rand = createPrng(48271);
+  const rand = mulberry32(48271);
   ctx.lineCap = "round";
   for (let i = 0; i < 210; i++) {
     const x = rand() * size;
@@ -174,7 +165,7 @@ function createPencilHatchTile(size: number): HTMLCanvasElement {
   ctx.putImageData(image, 0, 0);
 
   // Layered dry colored-pencil hatch & delicate cross-hatch wisps
-  const rand = createPrng(91873);
+  const rand = mulberry32(91873);
   ctx.lineCap = "round";
 
   for (let i = 0; i < 320; i++) {
@@ -235,7 +226,7 @@ function createPastelGrainTile(size: number): HTMLCanvasElement {
 
   ctx.putImageData(image, 0, 0);
 
-  const rand = createPrng(314159);
+  const rand = mulberry32(314159);
   for (let i = 0; i < 180; i++) {
     const x = rand() * size;
     const y = rand() * size;
@@ -265,7 +256,7 @@ function createSkyPencilTexture(width: number, height: number): HTMLCanvasElemen
   ctx.fillStyle = "#ffffff";
   ctx.fillRect(0, 0, width, height);
 
-  const rand = createPrng(77419);
+  const rand = mulberry32(77419);
   ctx.lineCap = "round";
 
   // 420+ hand-rubbed horizontal & gently slanted dry colored-pencil strokes across the sky
@@ -322,6 +313,40 @@ function createSkyPencilTexture(width: number, height: number): HTMLCanvasElemen
   return canvas;
 }
 
+function createCardFinishTexture(
+  width: number,
+  height: number,
+  paperTile: HTMLCanvasElement,
+  pastelGrainTile: HTMLCanvasElement,
+  pencilHatchTile: HTMLCanvasElement,
+): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return canvas;
+
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, width, height);
+
+  const layers: readonly { tile: HTMLCanvasElement; alpha: number }[] = [
+    { tile: paperTile, alpha: 0.4 },
+    { tile: pastelGrainTile, alpha: 0.16 },
+    { tile: pencilHatchTile, alpha: 0.11 },
+  ];
+
+  ctx.globalCompositeOperation = "multiply";
+  for (const layer of layers) {
+    if (!layer.tile.width) continue;
+    const pattern = ctx.createPattern(layer.tile, "repeat");
+    if (!pattern) continue;
+    ctx.globalAlpha = layer.alpha;
+    ctx.fillStyle = pattern;
+    ctx.fillRect(0, 0, width, height);
+  }
+  return canvas;
+}
+
 export function getPaperTextures(): PaperTextures {
   if (cachedTextures) return cachedTextures;
 
@@ -332,7 +357,7 @@ export function getPaperTextures(): PaperTextures {
       pencilHatchTile: stub,
       pastelGrainTile: stub,
       skyPencilTexture: stub,
-      stagePaperDataUrl: "",
+      cardFinishTexture: stub,
     };
   }
 
@@ -340,13 +365,20 @@ export function getPaperTextures(): PaperTextures {
   const pencilHatchTile = createPencilHatchTile(256);
   const pastelGrainTile = createPastelGrainTile(256);
   const skyPencilTexture = createSkyPencilTexture(CARD_WIDTH, CARD_HEIGHT);
+  const cardFinishTexture = createCardFinishTexture(
+    CARD_WIDTH,
+    CARD_HEIGHT,
+    paperTile,
+    pastelGrainTile,
+    pencilHatchTile,
+  );
 
   cachedTextures = {
     paperTile,
     pencilHatchTile,
     pastelGrainTile,
     skyPencilTexture,
-    stagePaperDataUrl: "",
+    cardFinishTexture,
   };
 
   return cachedTextures;
