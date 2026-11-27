@@ -5,8 +5,11 @@ export interface PaperTextures {
   paperTile: HTMLCanvasElement;
   pencilHatchTile: HTMLCanvasElement;
   pastelGrainTile: HTMLCanvasElement;
+  pencilHatchOverlay: HTMLCanvasElement;
+  pastelGrainOverlay: HTMLCanvasElement;
   skyPencilTexture: HTMLCanvasElement;
   cardFinishTexture: HTMLCanvasElement;
+  cardFinishOverlay: HTMLCanvasElement;
 }
 
 let cachedTextures: PaperTextures | null = null;
@@ -347,6 +350,48 @@ function createCardFinishTexture(
   return canvas;
 }
 
+function createSourceOverOverlay(source: HTMLCanvasElement): HTMLCanvasElement {
+  const width = source.width;
+  const height = source.height;
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  if (!width || !height) return canvas;
+
+  const srcCtx = source.getContext("2d");
+  const dstCtx = canvas.getContext("2d");
+  if (!srcCtx || !dstCtx) return canvas;
+
+  const srcData = srcCtx.getImageData(0, 0, width, height).data;
+  const dstImg = dstCtx.createImageData(width, height);
+  const dstData = dstImg.data;
+
+  // Convert white-base multiply texture M into an equivalent Porter-Duff source-over alpha overlay
+  // so mobile tile-based GPUs blend it in GMEM without framebuffer copies or tile flushes.
+  for (let p = 0; p < srcData.length; p += 4) {
+    const r = srcData[p] ?? 255;
+    const g = srcData[p + 1] ?? 255;
+    const b = srcData[p + 2] ?? 255;
+    const mMin = Math.min(r, g, b) / 255;
+    const a = 1 - mMin;
+    if (a <= 0.0005) {
+      dstData[p] = 0;
+      dstData[p + 1] = 0;
+      dstData[p + 2] = 0;
+      dstData[p + 3] = 0;
+      continue;
+    }
+    const invA = 205 / (255 * a);
+    dstData[p] = clampByte((r - mMin * 255) * invA);
+    dstData[p + 1] = clampByte((g - mMin * 255) * invA);
+    dstData[p + 2] = clampByte((b - mMin * 255) * invA);
+    dstData[p + 3] = clampByte(Math.round(a * 255));
+  }
+
+  dstCtx.putImageData(dstImg, 0, 0);
+  return canvas;
+}
+
 export function getPaperTextures(): PaperTextures {
   if (cachedTextures) return cachedTextures;
 
@@ -356,14 +401,19 @@ export function getPaperTextures(): PaperTextures {
       paperTile: stub,
       pencilHatchTile: stub,
       pastelGrainTile: stub,
+      pencilHatchOverlay: stub,
+      pastelGrainOverlay: stub,
       skyPencilTexture: stub,
       cardFinishTexture: stub,
+      cardFinishOverlay: stub,
     };
   }
 
   const paperTile = createColdPressPaperTile(256);
   const pencilHatchTile = createPencilHatchTile(256);
   const pastelGrainTile = createPastelGrainTile(256);
+  const pencilHatchOverlay = createSourceOverOverlay(pencilHatchTile);
+  const pastelGrainOverlay = createSourceOverOverlay(pastelGrainTile);
   const skyPencilTexture = createSkyPencilTexture(CARD_WIDTH, CARD_HEIGHT);
   const cardFinishTexture = createCardFinishTexture(
     CARD_WIDTH,
@@ -372,13 +422,17 @@ export function getPaperTextures(): PaperTextures {
     pastelGrainTile,
     pencilHatchTile,
   );
+  const cardFinishOverlay = createSourceOverOverlay(cardFinishTexture);
 
   cachedTextures = {
     paperTile,
     pencilHatchTile,
     pastelGrainTile,
+    pencilHatchOverlay,
+    pastelGrainOverlay,
     skyPencilTexture,
     cardFinishTexture,
+    cardFinishOverlay,
   };
 
   return cachedTextures;

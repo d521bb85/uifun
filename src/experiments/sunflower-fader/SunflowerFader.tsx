@@ -58,6 +58,7 @@ export interface SunflowerFaderProps {
 const formatPercent = (v: number) => `${Math.round(v)}%`;
 
 const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta"]);
+const DRAG_ACTIVATION_PX = 6;
 
 const CARD_FRAME_STYLE: CSSProperties = {
   width: `min(${CARD_WIDTH}px, max(120px, calc((100dvh - 132px) * ${CARD_WIDTH / CARD_HEIGHT})), calc(100vw - 104px))`,
@@ -105,35 +106,40 @@ export function SunflowerFader({
   className,
 }: SunflowerFaderProps) {
   const isControlled = value !== undefined;
-  const initialValue = clamp(isControlled ? value : defaultValue, 0, 100);
+  const controlledValue = isControlled ? clamp(value, 0, 100) : undefined;
+  const [initialValue] = useState(() => clamp(isControlled ? value : defaultValue, 0, 100));
 
   const [controller] = useState(() => createSliderController<number>());
-  const [uncontrolledValue, setUncontrolledValue] = useState(initialValue);
   const [hoveringHead, setHoveringHead] = useState(false);
   const [keyboardFocus, setKeyboardFocus] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(false);
   const [pageVisible, setPageVisible] = useState(true);
 
-  const activeValue = clamp(isControlled ? value : uncontrolledValue, 0, 100);
   const stageActive = useStageActive();
   const animateLoop = stageActive && pageVisible && !reducedMotion;
 
   const frameRef = useRef<HTMLDivElement | null>(null);
   const controlRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
+  const canvasRectRef = useRef<DOMRect | null>(null);
 
   const simRef = useRef<SunflowerSimState | null>(null);
   if (!simRef.current) {
     simRef.current = createInitialSimState(initialValue);
   }
 
-  const targetValueRef = useRef(activeValue);
-  targetValueRef.current = activeValue;
+  const targetValueRef = useRef(initialValue);
+  if (controlledValue !== undefined) {
+    targetValueRef.current = controlledValue;
+  }
 
   const animateLoopRef = useRef(animateLoop);
   animateLoopRef.current = animateLoop;
 
   const pointerCanvasRef = useRef<Point2D | null>(null);
+  const pressOriginClientRef = useRef<Point2D | null>(null);
+  const hasDraggedRef = useRef(false);
   const hoverHeadRef = useRef(false);
   const reducedMotionRef = useRef(false);
   const wheelAccumRef = useRef(0);
@@ -144,7 +150,7 @@ export function SunflowerFader({
     const frameEl = frameRef.current;
     if (!frameEl) return;
     const { xPct } = getHeadNormalizedCardPos(sim.head);
-    const quantized = `${(Math.round((xPct - 50) * 2) / 2).toFixed(1)}%`;
+    const quantized = `${Math.round(xPct - 50)}%`;
     if (lastHeadDxRef.current === quantized) return;
     lastHeadDxRef.current = quantized;
     frameEl.style.setProperty("--sunflower-head-dx", quantized);
@@ -161,7 +167,11 @@ export function SunflowerFader({
         canvas.width = targetW;
         canvas.height = targetH;
       }
-      const ctx = canvas.getContext("2d");
+      let ctx = ctxRef.current;
+      if (!ctx || ctx.canvas !== canvas) {
+        ctx = canvas.getContext("2d");
+        ctxRef.current = ctx;
+      }
       if (!ctx) return;
       renderSunflowerFrame(ctx, sim, dpr);
       syncHeadOffset(sim);
@@ -198,16 +208,34 @@ export function SunflowerFader({
     };
     const onWindowPointerMove = (event: globalThis.PointerEvent) => {
       if (!controlRef.current?.hasAttribute("data-dragging")) return;
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-      const rect = canvas.getBoundingClientRect();
+      const origin = pressOriginClientRef.current;
+      if (origin && !hasDraggedRef.current) {
+        const dx = event.clientX - origin.x;
+        const dy = event.clientY - origin.y;
+        if (dx * dx + dy * dy >= DRAG_ACTIVATION_PX * DRAG_ACTIVATION_PX) {
+          hasDraggedRef.current = true;
+        }
+      }
+      let rect = canvasRectRef.current;
+      if (!rect) {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        rect = canvas.getBoundingClientRect();
+        canvasRectRef.current = rect;
+      }
       if (rect.width <= 0 || rect.height <= 0) return;
       pointerCanvasRef.current = {
         x: ((event.clientX - rect.left) / rect.width) * CANVAS_WIDTH,
         y: ((event.clientY - rect.top) / rect.height) * CANVAS_HEIGHT,
       };
     };
+    const clearCachedRect = () => {
+      canvasRectRef.current = null;
+    };
     const onWindowPointerEnd = (event: globalThis.PointerEvent) => {
+      canvasRectRef.current = null;
+      pressOriginClientRef.current = null;
+      hasDraggedRef.current = false;
       if (event.pointerType === "touch") {
         pointerCanvasRef.current = null;
         if (hoverHeadRef.current) {
@@ -237,12 +265,16 @@ export function SunflowerFader({
     window.addEventListener("pointermove", onWindowPointerMove, true);
     window.addEventListener("pointerup", onWindowPointerEnd, true);
     window.addEventListener("pointercancel", onWindowPointerEnd, true);
+    window.addEventListener("resize", clearCachedRect, { passive: true });
+    window.addEventListener("scroll", clearCachedRect, { passive: true });
     return () => {
       window.removeEventListener("keydown", onWindowKeyDown, true);
       window.removeEventListener("pointerdown", onWindowPointerDown, true);
       window.removeEventListener("pointermove", onWindowPointerMove, true);
       window.removeEventListener("pointerup", onWindowPointerEnd, true);
       window.removeEventListener("pointercancel", onWindowPointerEnd, true);
+      window.removeEventListener("resize", clearCachedRect);
+      window.removeEventListener("scroll", clearCachedRect);
     };
   }, []);
 
@@ -288,7 +320,8 @@ export function SunflowerFader({
     const tick = (now: number) => {
       const dt = Math.min(Math.max((now - lastTime) / 1000, 0), 0.05);
       lastTime = now;
-      const dragging = controlRef.current?.hasAttribute("data-dragging") ?? false;
+      const dragging =
+        (controlRef.current?.hasAttribute("data-dragging") ?? false) && hasDraggedRef.current;
 
       stepSimState(sim, dt, {
         targetValue: targetValueRef.current,
@@ -308,9 +341,9 @@ export function SunflowerFader({
 
   useEffect(() => {
     if (!animateLoop) {
-      paintSettledValue(activeValue, hoveringHead);
+      paintSettledValue(controlledValue ?? targetValueRef.current, hoveringHead);
     }
-  }, [activeValue, hoveringHead, animateLoop, paintSettledValue]);
+  }, [controlledValue, hoveringHead, animateLoop, paintSettledValue]);
 
   // Native non-passive wheel listener so preventDefault stops page scroll only over the card.
   useEffect(() => {
@@ -353,15 +386,12 @@ export function SunflowerFader({
       if (details.canceled) {
         return;
       }
-      if (!isControlled) {
-        setUncontrolledValue(next);
-      }
       targetValueRef.current = next;
       if (!animateLoopRef.current) {
         paintSettledValue(next);
       }
     },
-    [isControlled, onValueChange, paintSettledValue],
+    [onValueChange, paintSettledValue],
   );
 
   const handlePointerMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
@@ -415,7 +445,7 @@ export function SunflowerFader({
       max={100}
       step={1}
       largeStep={10}
-      value={isControlled ? activeValue : undefined}
+      value={controlledValue}
       defaultValue={isControlled ? undefined : initialValue}
       onValueChange={handleValueChange}
       onValueCommit={onValueCommit}
@@ -495,9 +525,12 @@ export function SunflowerFader({
           onPointerDown={(event) => {
             lastModalityRef.current = "pointer";
             setKeyboardFocus(false);
+            pressOriginClientRef.current = { x: event.clientX, y: event.clientY };
+            hasDraggedRef.current = false;
             const canvas = canvasRef.current;
             if (!canvas) return;
             const rect = canvas.getBoundingClientRect();
+            canvasRectRef.current = rect;
             if (rect.width <= 0 || rect.height <= 0) return;
             pointerCanvasRef.current = {
               x: ((event.clientX - rect.left) / rect.width) * CANVAS_WIDTH,

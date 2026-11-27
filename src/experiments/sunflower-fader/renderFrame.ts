@@ -14,6 +14,9 @@ import {
 
 let cachedCardPath: Path2D | null = null;
 let cachedBottomGuardPath: Path2D | null = null;
+let cachedCardShadow: { canvas: HTMLCanvasElement; dpr: number } | null = null;
+
+const SHADOW_PAD = 24;
 
 function createRoundedRectPath(x: number, y: number, w: number, h: number, r: number): Path2D {
   const path = new Path2D();
@@ -35,6 +38,38 @@ function getCardPath(): Path2D {
     cachedCardPath = createRoundedRectPath(BLEED_X, BLEED_Y, CARD_WIDTH, CARD_HEIGHT, CARD_RADIUS);
   }
   return cachedCardPath;
+}
+
+function getCardShadowCanvas(dpr: number, paperBgCss: string): HTMLCanvasElement | null {
+  if (typeof document === "undefined") return null;
+  if (cachedCardShadow && cachedCardShadow.dpr === dpr) {
+    return cachedCardShadow.canvas;
+  }
+  const w = CARD_WIDTH + SHADOW_PAD * 2;
+  const h = CARD_HEIGHT + SHADOW_PAD * 2;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const localCard = createRoundedRectPath(
+    SHADOW_PAD,
+    SHADOW_PAD,
+    CARD_WIDTH,
+    CARD_HEIGHT,
+    CARD_RADIUS,
+  );
+  ctx.shadowColor = "rgba(44, 38, 30, 0.11)";
+  ctx.shadowBlur = 14;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 3;
+  ctx.fillStyle = paperBgCss;
+  ctx.fill(localCard);
+
+  cachedCardShadow = { canvas, dpr };
+  return canvas;
 }
 
 function getBottomGuardPath(): Path2D {
@@ -73,23 +108,26 @@ export function renderSunflowerFrame(
   const palette = getPalette(state.phases);
   const cardPath = getCardPath();
   const bottomGuardPath = getBottomGuardPath();
-  const { cardFinishTexture } = getPaperTextures();
+  const { cardFinishOverlay } = getPaperTextures();
 
-  // Subtle natural paper elevation shadow beneath the card (NO border stroke!)
-  ctx.save();
-  ctx.shadowColor = "rgba(44, 38, 30, 0.11)";
-  ctx.shadowBlur = 14;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 3;
-  ctx.fillStyle = rgbToCss(palette.paperBg);
-  ctx.fill(cardPath);
-  ctx.restore();
+  // Pre-rendered subtle paper elevation shadow beneath the card (0 per-frame shadowBlur passes)
+  const cardShadow = getCardShadowCanvas(scale, rgbToCss(palette.paperBg));
+  if (cardShadow) {
+    ctx.drawImage(
+      cardShadow,
+      BLEED_X - SHADOW_PAD,
+      BLEED_Y - SHADOW_PAD,
+      CARD_WIDTH + SHADOW_PAD * 2,
+      CARD_HEIGHT + SHADOW_PAD * 2,
+    );
+  } else {
+    ctx.fillStyle = rgbToCss(palette.paperBg);
+    ctx.fill(cardPath);
+  }
 
-  // Clipped card background: warm cotton paper base, pastel sky, clouds, back & mid meadow
+  // Clipped card background: pastel sky, clouds, back & mid meadow
   ctx.save();
   ctx.clip(cardPath);
-  ctx.fillStyle = rgbToCss(palette.paperBg);
-  ctx.fillRect(BLEED_X, BLEED_Y, CARD_WIDTH, CARD_HEIGHT);
   paintSkyAndAtmosphere(ctx, state, palette);
   paintMeadowLayer(ctx, state, palette, "back");
   paintMeadowLayer(ctx, state, palette, "mid");
@@ -98,7 +136,7 @@ export function renderSunflowerFrame(
   // Sunflower (allowed to softly extend past left/right/top edges, neatly framed at bottom corners)
   ctx.save();
   ctx.clip(bottomGuardPath);
-  paintSunflower(ctx, state, palette, cardPath);
+  paintSunflower(ctx, state, palette, cardPath, scale);
   ctx.restore();
 
   // Foreground meadow, airborne pollen/insects, and cold-press storybook paper finish ONLY inside the card
@@ -107,11 +145,8 @@ export function renderSunflowerFrame(
   paintMeadowLayer(ctx, state, palette, "front");
   paintAirborneLife(ctx, state, palette);
 
-  if (cardFinishTexture.width) {
-    ctx.save();
-    ctx.globalCompositeOperation = "multiply";
-    ctx.drawImage(cardFinishTexture, BLEED_X, BLEED_Y, CARD_WIDTH, CARD_HEIGHT);
-    ctx.restore();
+  if (cardFinishOverlay.width) {
+    ctx.drawImage(cardFinishOverlay, BLEED_X, BLEED_Y, CARD_WIDTH, CARD_HEIGHT);
   }
   ctx.restore();
 

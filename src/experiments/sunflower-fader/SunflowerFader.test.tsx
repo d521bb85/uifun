@@ -9,6 +9,7 @@ import {
 } from "./botanyPhysics";
 import { computePhasedProgress, getPalette, lerp, rgbToCss } from "./colorAndCurves";
 import experimentMeta from "./index";
+import { renderSunflowerFrame } from "./renderFrame";
 import { SunflowerFader } from "./SunflowerFader";
 import SunflowerFaderDemo from "./SunflowerFaderDemo";
 import {
@@ -542,5 +543,185 @@ describe("botanyPhysics", () => {
     }
 
     expect(maxSteadyJump).toBeLessThan(0.25);
+  });
+});
+
+describe("renderSunflowerFrame mobile GPU budget", () => {
+  it("avoids per-frame shadowBlur, multiply compositing, and gradient/draw-call explosions", () => {
+    const prevDocument = globalThis.document;
+    const prevPath2D = globalThis.Path2D;
+
+    interface Counters {
+      fills: number;
+      strokes: number;
+      gradients: number;
+      shadowBlurDraws: number;
+      multiplyDraws: number;
+      drawImages: number;
+      clips: number;
+    }
+
+    const createMockCanvas = (counters?: Counters) => {
+      const canvas = {
+        width: CANVAS_WIDTH * 2,
+        height: CANVAS_HEIGHT * 2,
+        getContext: () => ctx,
+      };
+      const stateStack: { shadowBlur: number; globalCompositeOperation: string }[] = [];
+      const ctx = {
+        canvas,
+        shadowBlur: 0,
+        shadowColor: "",
+        shadowOffsetX: 0,
+        shadowOffsetY: 0,
+        globalCompositeOperation: "source-over",
+        globalAlpha: 1,
+        fillStyle: "",
+        strokeStyle: "",
+        lineWidth: 1,
+        lineCap: "butt",
+        lineJoin: "miter",
+        save() {
+          stateStack.push({
+            shadowBlur: this.shadowBlur,
+            globalCompositeOperation: this.globalCompositeOperation,
+          });
+        },
+        restore() {
+          const prev = stateStack.pop();
+          if (prev) {
+            this.shadowBlur = prev.shadowBlur;
+            this.globalCompositeOperation = prev.globalCompositeOperation;
+          }
+        },
+        setTransform() {},
+        transform() {},
+        translate() {},
+        rotate() {},
+        scale() {},
+        clearRect() {},
+        beginPath() {},
+        closePath() {},
+        moveTo() {},
+        lineTo() {},
+        quadraticCurveTo() {},
+        bezierCurveTo() {},
+        arc() {},
+        ellipse() {},
+        rect() {},
+        clip() {
+          if (counters) counters.clips++;
+        },
+        fill() {
+          if (counters) {
+            counters.fills++;
+            if (this.shadowBlur > 0) counters.shadowBlurDraws++;
+            if (this.globalCompositeOperation === "multiply") counters.multiplyDraws++;
+          }
+        },
+        fillRect() {
+          if (counters) {
+            counters.fills++;
+            if (this.shadowBlur > 0) counters.shadowBlurDraws++;
+            if (this.globalCompositeOperation === "multiply") counters.multiplyDraws++;
+          }
+        },
+        stroke() {
+          if (counters) {
+            counters.strokes++;
+            if (this.shadowBlur > 0) counters.shadowBlurDraws++;
+            if (this.globalCompositeOperation === "multiply") counters.multiplyDraws++;
+          }
+        },
+        drawImage() {
+          if (counters) {
+            counters.drawImages++;
+            if (this.shadowBlur > 0) counters.shadowBlurDraws++;
+            if (this.globalCompositeOperation === "multiply") counters.multiplyDraws++;
+          }
+        },
+        createLinearGradient() {
+          if (counters) counters.gradients++;
+          return { addColorStop() {} };
+        },
+        createRadialGradient() {
+          if (counters) counters.gradients++;
+          return { addColorStop() {} };
+        },
+        createPattern() {
+          return {};
+        },
+        createImageData(w: number, h: number) {
+          return { data: new Uint8ClampedArray(Math.max(1, w * h * 4)), width: w, height: h };
+        },
+        getImageData(_x: number, _y: number, w: number, h: number) {
+          return { data: new Uint8ClampedArray(Math.max(1, w * h * 4)), width: w, height: h };
+        },
+        putImageData() {},
+      };
+      return { canvas, ctx };
+    };
+
+    class MockPath2D {
+      moveTo() {}
+      lineTo() {}
+      quadraticCurveTo() {}
+      bezierCurveTo() {}
+      arc() {}
+      ellipse() {}
+      rect() {}
+      closePath() {}
+      addPath() {}
+    }
+
+    try {
+      (globalThis as unknown as { Path2D: unknown }).Path2D = MockPath2D;
+      (globalThis as unknown as { document: unknown }).document = {
+        createElement: () => createMockCanvas().canvas,
+      };
+
+      const counters: Counters = {
+        fills: 0,
+        strokes: 0,
+        gradients: 0,
+        shadowBlurDraws: 0,
+        multiplyDraws: 0,
+        drawImages: 0,
+        clips: 0,
+      };
+      const main = createMockCanvas(counters);
+      const sim = createInitialSimState(75);
+
+      // Warm up one-time sprite/texture caches on frame 0
+      renderSunflowerFrame(main.ctx as unknown as CanvasRenderingContext2D, sim, 2);
+
+      // Measure steady-state idle frame
+      counters.fills = 0;
+      counters.strokes = 0;
+      counters.gradients = 0;
+      counters.shadowBlurDraws = 0;
+      counters.multiplyDraws = 0;
+      counters.drawImages = 0;
+      counters.clips = 0;
+
+      stepSimState(sim, 1 / 60, {
+        targetValue: 75,
+        dragging: false,
+        hoverHead: false,
+        pointerCanvas: null,
+        reducedMotion: false,
+      });
+      renderSunflowerFrame(main.ctx as unknown as CanvasRenderingContext2D, sim, 2);
+
+      expect(counters.shadowBlurDraws).toBe(0);
+      expect(counters.multiplyDraws).toBe(0);
+      expect(counters.gradients).toBeLessThan(25);
+      expect(counters.fills + counters.strokes).toBeLessThan(120);
+      // Only card/bottom/stem/outside-shadow clips on idle (0 per-leaf complex clips)
+      expect(counters.clips).toBeLessThanOrEqual(6);
+    } finally {
+      (globalThis as unknown as { document: unknown }).document = prevDocument;
+      (globalThis as unknown as { Path2D: unknown }).Path2D = prevPath2D;
+    }
   });
 });

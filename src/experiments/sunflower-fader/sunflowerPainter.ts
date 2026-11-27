@@ -95,6 +95,8 @@ const FRONT_PETAL_SPECS: readonly PetalSpec[] = PETAL_SPECS.filter((s) => s.ring
 
 interface SepalSpec {
   angle: number;
+  cosA: number;
+  sinA: number;
   lengthMul: number;
   widthMul: number;
   seed: number;
@@ -105,8 +107,11 @@ const SEPAL_SPECS: readonly SepalSpec[] = (() => {
   const specs: SepalSpec[] = [];
   const count = 14;
   for (let i = 0; i < count; i++) {
+    const angle = (i / count) * Math.PI * 2 + (rng() - 0.5) * 0.12;
     specs.push({
-      angle: (i / count) * Math.PI * 2 + (rng() - 0.5) * 0.12,
+      angle,
+      cosA: Math.cos(angle),
+      sinA: Math.sin(angle),
       lengthMul: 0.86 + rng() * 0.34,
       widthMul: 0.86 + rng() * 0.24,
       seed: Math.floor(rng() * 100000),
@@ -115,15 +120,9 @@ const SEPAL_SPECS: readonly SepalSpec[] = (() => {
   return specs.sort((a, b) => compareRadialDepth(a.angle, b.angle, a.seed, b.seed));
 })();
 
-interface PetalSpriteSet {
-  front: HTMLCanvasElement[];
-  back: HTMLCanvasElement[];
-}
-
 interface BotanicalSpriteBank {
-  petalsWilted: PetalSpriteSet;
-  petalsMid: PetalSpriteSet;
-  petalsBloom: PetalSpriteSet;
+  /** Single 8x3 atlas: col = (ring === 0 ? 0 : 4) + variant, row = 0(wilted) | 1(mid) | 2(bloom) */
+  petalAtlas: HTMLCanvasElement;
   diskWilted: HTMLCanvasElement;
   diskMid: HTMLCanvasElement;
   diskBloom: HTMLCanvasElement;
@@ -133,15 +132,15 @@ let cachedSpriteBank: BotanicalSpriteBank | null = null;
 let cachedOutsideCardPath: Path2D | null = null;
 let cachedOutsideCardSource: Path2D | null = null;
 
-const hatchPatternCache = new WeakMap<CanvasRenderingContext2D, CanvasPattern | null>();
+const hatchOverlayPatternCache = new WeakMap<CanvasRenderingContext2D, CanvasPattern | null>();
 
-function getHatchPattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
-  if (hatchPatternCache.has(ctx)) {
-    return hatchPatternCache.get(ctx) ?? null;
+function getHatchOverlayPattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
+  if (hatchOverlayPatternCache.has(ctx)) {
+    return hatchOverlayPatternCache.get(ctx) ?? null;
   }
-  const { pencilHatchTile } = getPaperTextures();
-  const pat = pencilHatchTile.width ? ctx.createPattern(pencilHatchTile, "repeat") : null;
-  hatchPatternCache.set(ctx, pat);
+  const { pencilHatchOverlay } = getPaperTextures();
+  const pat = pencilHatchOverlay.width ? ctx.createPattern(pencilHatchOverlay, "repeat") : null;
+  hatchOverlayPatternCache.set(ctx, pat);
   return pat;
 }
 
@@ -157,18 +156,15 @@ function getOutsideCardPath(cardPath: Path2D): Path2D {
   return outer;
 }
 
-function createPetalSprite(
+function paintPetalSpriteInto(
+  ctx: CanvasRenderingContext2D,
+  offsetX: number,
+  offsetY: number,
   palette: SunflowerPalette,
   variant: number,
   isBackRing: boolean,
   bloomLevel: number,
-): HTMLCanvasElement {
-  const canvas = document.createElement("canvas");
-  canvas.width = PETAL_SPRITE_W;
-  canvas.height = PETAL_SPRITE_H;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return canvas;
-
+): void {
   const rng = mulberry32(4100 + variant * 977 + (isBackRing ? 313 : 0));
   const tipBend = (variant - 1.5) * 3.2;
   const bellyShift = (variant % 2 === 0 ? 1 : -1) * 1.4;
@@ -179,7 +175,9 @@ function createPetalSprite(
   const yTip = PETAL_BASE_Y + PETAL_SPAN_Y;
   const hw = PETAL_HALF_W * widthBias;
 
-  // Organic lance-shaped sunflower petal contour (base -> broad velvety belly -> pointed tip)
+  ctx.save();
+  ctx.translate(offsetX, offsetY);
+
   const petalPath = new Path2D();
   petalPath.moveTo(cx - hw * 0.42, y0);
   petalPath.bezierCurveTo(
@@ -214,7 +212,6 @@ function createPetalSprite(
     : palette.petalTip;
   const highlightCream = lerpRgb(tipTone, palette.paperBg, 0.36);
 
-  // Soft watercolor-pastel underwash
   const baseGrad = ctx.createLinearGradient(cx, y0, cx + tipBend * 0.5, yTip);
   baseGrad.addColorStop(0, rgbToCss(lerpRgb(shadowTone, innerTone, 0.35)));
   baseGrad.addColorStop(0.22, rgbToCss(innerTone));
@@ -225,10 +222,8 @@ function createPetalSprite(
   ctx.fillStyle = baseGrad;
   ctx.fill(petalPath);
 
-  // Everything inside clipped to the petal silhouette
   ctx.clip(petalPath);
 
-  // Soft warm sienna basal shading wash where petals nestle against the seed disk
   const baseShade = ctx.createRadialGradient(cx, y0 - 2, 2, cx, y0 + 18, 44);
   baseShade.addColorStop(0, rgbToCss(shadowTone, 0.55));
   baseShade.addColorStop(0.55, rgbToCss(innerTone, 0.24));
@@ -236,7 +231,6 @@ function createPetalSprite(
   ctx.fillStyle = baseShade;
   ctx.fillRect(0, 0, PETAL_SPRITE_W, PETAL_SPRITE_H);
 
-  // Subtle sunlit left-side glow & gentle right-side sculptural shadow
   const sideGrad = ctx.createLinearGradient(cx - hw, y0, cx + hw, y0);
   sideGrad.addColorStop(0, rgbToCss(highlightCream, 0.28));
   sideGrad.addColorStop(0.45, rgbToCss(midTone, 0));
@@ -244,11 +238,10 @@ function createPetalSprite(
   ctx.fillStyle = sideGrad;
   ctx.fillRect(0, 0, PETAL_SPRITE_W, PETAL_SPRITE_H);
 
-  // 42 fine longitudinal colored-pencil hatch strokes running from base toward tip
   ctx.lineCap = "round";
   const strokeCount = 42;
   for (let s = 0; s < strokeCount; s++) {
-    const u = (s / (strokeCount - 1)) * 2 - 1; // -1..+1 across width
+    const u = (s / (strokeCount - 1)) * 2 - 1;
     const jitterU = (rng() - 0.5) * 0.08;
     const lane = u + jitterU;
     const startFrac = rng() * 0.22;
@@ -264,15 +257,12 @@ function createPetalSprite(
     let col: RGB;
     let alpha: number;
     if (startFrac < 0.08 && rng() > 0.35) {
-      // Deep raw-sienna/amber basal pencil strokes
       col = shadowTone;
       alpha = 0.14 + rng() * 0.18;
     } else if (lane < -0.15 && rng() > 0.42) {
-      // Sunlit pale-buttercup dry-pencil highlight strokes
       col = highlightCream;
       alpha = 0.16 + rng() * 0.2;
     } else if (lane > 0.25 && rng() > 0.38) {
-      // Warm ochre shaded flank strokes
       col = lerpRgb(innerTone, shadowTone, 0.45);
       alpha = 0.12 + rng() * 0.16;
     } else {
@@ -288,7 +278,6 @@ function createPetalSprite(
     ctx.stroke();
   }
 
-  // Delicate botanical longitudinal central crease (shadow groove + adjacent sunlit cream ridge)
   ctx.strokeStyle = rgbToCss(shadowTone, lerp(0.36, 0.26, bloomLevel));
   ctx.lineWidth = 1.15;
   ctx.beginPath();
@@ -313,7 +302,6 @@ function createPetalSprite(
   );
   ctx.stroke();
 
-  // Secondary subtle flank groove lines
   for (const side of [-1, 1] as const) {
     ctx.strokeStyle = rgbToCss(shadowTone, 0.15);
     ctx.lineWidth = 0.75;
@@ -328,7 +316,6 @@ function createPetalSprite(
     ctx.stroke();
   }
 
-  // Soft dry paper-tooth texture inside petal so chalky colored-pencil grain shows clearly
   const { pastelGrainTile } = getPaperTextures();
   if (pastelGrainTile.width) {
     ctx.globalCompositeOperation = "multiply";
@@ -337,7 +324,6 @@ function createPetalSprite(
   }
   ctx.restore();
 
-  // Whisper-soft warm colored-pencil contour (NO black cartoon outline!)
   const edgeCol = lerpRgb(shadowTone, palette.outlineInk, lerp(0.45, 0.22, bloomLevel));
   const edgeGrad = ctx.createLinearGradient(cx, y0, cx, yTip);
   edgeGrad.addColorStop(0, rgbToCss(edgeCol, isBackRing ? 0.34 : 0.42));
@@ -348,6 +334,36 @@ function createPetalSprite(
   ctx.lineJoin = "round";
   ctx.stroke(petalPath);
 
+  ctx.restore();
+}
+
+function createPetalAtlas(
+  pal0: SunflowerPalette,
+  palMid: SunflowerPalette,
+  pal1: SunflowerPalette,
+): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  canvas.width = PETAL_SPRITE_W * 8;
+  canvas.height = PETAL_SPRITE_H * 3;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return canvas;
+
+  const stages: readonly { palette: SunflowerPalette; bloom: number }[] = [
+    { palette: pal0, bloom: 0 },
+    { palette: palMid, bloom: 0.5 },
+    { palette: pal1, bloom: 1 },
+  ];
+
+  for (let row = 0; row < stages.length; row++) {
+    const stage = stages[row];
+    if (!stage) continue;
+    const oy = row * PETAL_SPRITE_H;
+    for (let v = 0; v < 4; v++) {
+      // Cols 0..3: back ring; cols 4..7: front ring
+      paintPetalSpriteInto(ctx, v * PETAL_SPRITE_W, oy, stage.palette, v, true, stage.bloom);
+      paintPetalSpriteInto(ctx, (4 + v) * PETAL_SPRITE_W, oy, stage.palette, v, false, stage.bloom);
+    }
+  }
   return canvas;
 }
 
@@ -366,7 +382,6 @@ function createDiskSprite(palette: SunflowerPalette, bloomLevel: number): HTMLCa
   const diskCircle = new Path2D();
   diskCircle.arc(cx, cy, r, 0, Math.PI * 2);
 
-  // Soft velvety botanical radial wash (moss-olive center -> honey-bronze ring -> roasted umber collar)
   const baseGrad = ctx.createRadialGradient(
     cx - r * 0.12,
     cy - r * 0.12,
@@ -387,7 +402,6 @@ function createDiskSprite(palette: SunflowerPalette, bloomLevel: number): HTMLCa
 
   ctx.clip(diskCircle);
 
-  // Subtle top-left sunlight warmth and bottom-right velvety shadow across the domed seed cushion
   const lightGrad = ctx.createRadialGradient(
     cx - r * 0.28,
     cy - r * 0.28,
@@ -402,7 +416,6 @@ function createDiskSprite(palette: SunflowerPalette, bloomLevel: number): HTMLCa
   ctx.fillStyle = lightGrad;
   ctx.fillRect(0, 0, DISK_SPRITE_SIZE, DISK_SPRITE_SIZE);
 
-  // Soft stippled pointillist Fibonacci spiral (264 individual shaded florets & seeds!)
   for (let i = 0; i < SEED_COUNT; i++) {
     const frac = (i + 0.5) / SEED_COUNT;
     const rn = Math.sqrt(frac);
@@ -412,7 +425,6 @@ function createDiskSprite(palette: SunflowerPalette, bloomLevel: number): HTMLCa
     const sy = cy + Math.sin(theta) * (rn * r * 0.94 + jitterR);
     const seedR = (2.1 + rn * 2.15) * lerp(0.84, 1.0, bloomLevel);
 
-    // Subtle directional lighting factor from upper-left (-0.7, -0.7)
     const lightDir = -(Math.cos(theta) * 0.7 + Math.sin(theta) * 0.7) * rn;
 
     let seedCol: RGB;
@@ -420,7 +432,6 @@ function createDiskSprite(palette: SunflowerPalette, bloomLevel: number): HTMLCa
     let shadowCol: RGB;
 
     if (rn < 0.42) {
-      // Sunken velvety moss-olive center rosette
       const k = rn / 0.42;
       seedCol = lerpRgb(
         lerpRgb(palette.diskCenter, palette.outlineInk, 0.28),
@@ -430,26 +441,22 @@ function createDiskSprite(palette: SunflowerPalette, bloomLevel: number): HTMLCa
       hiCol = lerpRgb(palette.diskCenter, palette.leafHighlight, 0.42 * bloomLevel + 0.1);
       shadowCol = lerpRgb(palette.diskCenter, palette.outlineInk, 0.48);
     } else if (rn < 0.79) {
-      // Luminous pebbled golden-ochre & warm bronze pollen ring
       const k = (rn - 0.42) / 0.37;
       const ringPeak = Math.sin(k * Math.PI);
       seedCol = lerpRgb(palette.diskEdge, palette.diskMid, 0.28 + ringPeak * 0.62);
       hiCol = lerpRgb(palette.diskMid, palette.petalTip, 0.52 * bloomLevel + 0.14);
       shadowCol = lerpRgb(palette.diskEdge, palette.outlineInk, 0.38);
     } else {
-      // Rich roasted umber-sienna outer seed collar
       seedCol = lerpRgb(palette.diskEdge, palette.outlineInk, 0.18);
       hiCol = lerpRgb(palette.diskMid, palette.petalInner, 0.36 * bloomLevel + 0.12);
       shadowCol = lerpRgb(palette.diskEdge, palette.outlineInk, 0.48);
     }
 
-    // Tiny crevice shadow tucked beneath each seed for tactile pebbled relief
     ctx.fillStyle = rgbToCss(shadowCol, 0.52);
     ctx.beginPath();
     ctx.ellipse(sx + 0.85, sy + 0.95, seedR * 1.05, seedR * 0.9, theta, 0, Math.PI * 2);
     ctx.fill();
 
-    // Colored-pencil stippled seed body
     ctx.fillStyle = rgbToCss(seedCol, 0.92);
     ctx.beginPath();
     ctx.ellipse(
@@ -463,7 +470,6 @@ function createDiskSprite(palette: SunflowerPalette, bloomLevel: number): HTMLCa
     );
     ctx.fill();
 
-    // Sunlit pollen dot / stipple speck on upper-left crest of floret
     const hiAlpha = clamp01(lerp(0.24, 0.78, bloomLevel) + lightDir * 0.24);
     if (rn > 0.24 && (i % 2 === 0 || rn > 0.44)) {
       ctx.fillStyle = rgbToCss(hiCol, hiAlpha);
@@ -473,7 +479,6 @@ function createDiskSprite(palette: SunflowerPalette, bloomLevel: number): HTMLCa
     }
   }
 
-  // Paper-tooth texture inside disk so stippling feels softly pressed into cotton paper
   const { pastelGrainTile } = getPaperTextures();
   if (pastelGrainTile.width) {
     ctx.globalCompositeOperation = "multiply";
@@ -482,7 +487,6 @@ function createDiskSprite(palette: SunflowerPalette, bloomLevel: number): HTMLCa
   }
   ctx.restore();
 
-  // Fuzzy delicate radial colored-pencil stamen hairs softening the outer disk rim (ZERO hard outline!)
   ctx.save();
   ctx.lineCap = "round";
   const stamenCount = 68;
@@ -507,16 +511,6 @@ function createDiskSprite(palette: SunflowerPalette, bloomLevel: number): HTMLCa
   return canvas;
 }
 
-function createPetalSpriteSet(palette: SunflowerPalette, bloomLevel: number): PetalSpriteSet {
-  const front: HTMLCanvasElement[] = [];
-  const back: HTMLCanvasElement[] = [];
-  for (let v = 0; v < 4; v++) {
-    front.push(createPetalSprite(palette, v, false, bloomLevel));
-    back.push(createPetalSprite(palette, v, true, bloomLevel));
-  }
-  return { front, back };
-}
-
 function getBotanicalSpriteBank(): BotanicalSpriteBank | null {
   if (cachedSpriteBank) return cachedSpriteBank;
   if (typeof document === "undefined") return null;
@@ -526,9 +520,7 @@ function getBotanicalSpriteBank(): BotanicalSpriteBank | null {
   const pal1 = getPalette(computePhasedProgress(1));
 
   cachedSpriteBank = {
-    petalsWilted: createPetalSpriteSet(pal0, 0),
-    petalsMid: createPetalSpriteSet(palMid, 0.5),
-    petalsBloom: createPetalSpriteSet(pal1, 1),
+    petalAtlas: createPetalAtlas(pal0, palMid, pal1),
     diskWilted: createDiskSprite(pal0, 0),
     diskMid: createDiskSprite(palMid, 0.5),
     diskBloom: createDiskSprite(pal1, 1),
@@ -540,24 +532,24 @@ function getBotanicalSpriteBank(): BotanicalSpriteBank | null {
 function traceSmoothSpline(
   target: Path2D | CanvasRenderingContext2D,
   pts: readonly Point2D[],
+  count: number,
   startWithMove: boolean,
   yOffset = 0,
 ): void {
-  const n = pts.length;
   const first = pts[0];
-  if (n === 0 || !first) return;
+  if (count === 0 || !first) return;
   if (startWithMove) {
     target.moveTo(first.x, first.y + yOffset);
   } else {
     target.lineTo(first.x, first.y + yOffset);
   }
-  if (n === 1) return;
-  if (n === 2) {
+  if (count === 1) return;
+  if (count === 2) {
     const second = pts[1];
     if (second) target.lineTo(second.x, second.y + yOffset);
     return;
   }
-  for (let i = 1; i < n - 1; i++) {
+  for (let i = 1; i < count - 1; i++) {
     const curr = pts[i];
     const next = pts[i + 1];
     if (!curr || !next) continue;
@@ -568,25 +560,25 @@ function traceSmoothSpline(
       (curr.y + next.y) * 0.5 + yOffset,
     );
   }
-  const last = pts[n - 1];
+  const last = pts[count - 1];
   if (last) target.lineTo(last.x, last.y + yOffset);
 }
 
 function traceSmoothSplineReverse(
   target: Path2D | CanvasRenderingContext2D,
   pts: readonly Point2D[],
+  count: number,
 ): void {
-  const n = pts.length;
-  const last = pts[n - 1];
-  if (n === 0 || !last) return;
+  const last = pts[count - 1];
+  if (count === 0 || !last) return;
   target.lineTo(last.x, last.y);
-  if (n === 1) return;
-  if (n === 2) {
+  if (count === 1) return;
+  if (count === 2) {
     const first = pts[0];
     if (first) target.lineTo(first.x, first.y);
     return;
   }
-  for (let i = n - 2; i >= 1; i--) {
+  for (let i = count - 2; i >= 1; i--) {
     const curr = pts[i];
     const next = pts[i - 1];
     if (!curr || !next) continue;
@@ -596,52 +588,81 @@ function traceSmoothSplineReverse(
   if (first) target.lineTo(first.x, first.y);
 }
 
+// Reusable scratch buffers for stem geometry (0 per-frame Point2D allocations)
+const stemLeftPts: Point2D[] = [];
+const stemRightPts: Point2D[] = [];
+const stemHiPts: Point2D[] = [];
+const stemShadowPts: Point2D[] = [];
+const stemFiberPts: Point2D[] = [];
+
+function ensurePointPool(pool: Point2D[], size: number): void {
+  while (pool.length < size) {
+    pool.push({ x: 0, y: 0 });
+  }
+}
+
 function drawStem(
   ctx: CanvasRenderingContext2D,
   stem: readonly StemNode[],
   palette: SunflowerPalette,
 ): void {
-  if (stem.length < 2) return;
+  const n = stem.length;
+  if (n < 2) return;
 
-  const leftPts: Point2D[] = [];
-  const rightPts: Point2D[] = [];
-  const hiPts: Point2D[] = [];
-  const shadowPts: Point2D[] = [];
+  ensurePointPool(stemLeftPts, n);
+  ensurePointPool(stemRightPts, n);
+  ensurePointPool(stemHiPts, n);
+  ensurePointPool(stemShadowPts, n);
+  ensurePointPool(stemFiberPts, n);
 
-  for (let i = 0; i < stem.length; i++) {
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+
+  for (let i = 0; i < n; i++) {
     const node = stem[i];
     if (!node) continue;
     const nx = -node.ty;
     const ny = node.tx;
-    leftPts.push({
-      x: node.x - nx * node.radius,
-      y: node.y - ny * node.radius,
-    });
-    rightPts.push({
-      x: node.x + nx * node.radius,
-      y: node.y + ny * node.radius,
-    });
-    hiPts.push({
-      x: node.x - nx * node.radius * 0.44,
-      y: node.y - ny * node.radius * 0.44,
-    });
-    shadowPts.push({
-      x: node.x + nx * node.radius * 0.54,
-      y: node.y + ny * node.radius * 0.54,
-    });
+    const rx = nx * node.radius;
+    const ry = ny * node.radius;
+
+    const lx = node.x - rx;
+    const ly = node.y - ry;
+    const rrx = node.x + rx;
+    const rry = node.y + ry;
+
+    const lp = stemLeftPts[i] as Point2D;
+    lp.x = lx;
+    lp.y = ly;
+    const rp = stemRightPts[i] as Point2D;
+    rp.x = rrx;
+    rp.y = rry;
+    const hp = stemHiPts[i] as Point2D;
+    hp.x = node.x - rx * 0.44;
+    hp.y = node.y - ry * 0.44;
+    const sp = stemShadowPts[i] as Point2D;
+    sp.x = node.x + rx * 0.54;
+    sp.y = node.y + ry * 0.54;
+
+    if (lx < minX) minX = lx;
+    if (rrx < minX) minX = rrx;
+    if (lx > maxX) maxX = lx;
+    if (rrx > maxX) maxX = rrx;
+    if (ly < minY) minY = ly;
+    if (rry < minY) minY = rry;
+    if (ly > maxY) maxY = ly;
+    if (rry > maxY) maxY = rry;
   }
 
-  const firstLeft = leftPts[0];
-  const lastRight = rightPts[rightPts.length - 1];
-  if (!firstLeft || !lastRight) return;
-
   const stemPath = new Path2D();
-  traceSmoothSpline(stemPath, leftPts, true);
-  traceSmoothSplineReverse(stemPath, rightPts);
+  traceSmoothSpline(stemPath, stemLeftPts, n, true);
+  traceSmoothSplineReverse(stemPath, stemRightPts, n);
   stemPath.closePath();
 
   const firstNode = stem[0];
-  const lastNode = stem[stem.length - 1];
+  const lastNode = stem[n - 1];
   const grad = ctx.createLinearGradient(
     firstNode ? firstNode.x : BLEED_X + CARD_WIDTH * 0.5,
     firstNode ? firstNode.y : BLEED_Y + 536,
@@ -659,59 +680,52 @@ function drawStem(
 
   ctx.clip(stemPath);
 
-  // Subtle colored-pencil grain inside stem
-  const hatchPat = getHatchPattern(ctx);
+  // Subtle colored-pencil grain inside stem (source-over overlay + tight bounding box, ZERO multiply!)
+  const hatchPat = getHatchOverlayPattern(ctx);
   if (hatchPat) {
     ctx.save();
-    ctx.globalCompositeOperation = "multiply";
-    ctx.globalAlpha = 0.22;
+    ctx.globalAlpha = 0.24;
     ctx.fillStyle = hatchPat;
-    ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+    ctx.fillRect(minX - 2, minY - 2, maxX - minX + 4, maxY - minY + 4);
     ctx.restore();
   }
 
-  // Soft sunlit pale sage-cream ridge along left/upper flank
   ctx.strokeStyle = rgbToCss(lerpRgb(palette.stemHighlight, palette.paperBg, 0.22), 0.62);
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.beginPath();
-  traceSmoothSpline(ctx, hiPts, true);
+  traceSmoothSpline(ctx, stemHiPts, n, true);
   ctx.lineWidth = 2.4;
   ctx.stroke();
 
-  // Warm mossy-umber shadow flank on right/underside
   ctx.strokeStyle = rgbToCss(lerpRgb(palette.stemBase, palette.stemOutline, 0.44), 0.5);
   ctx.beginPath();
-  traceSmoothSpline(ctx, shadowPts, true);
+  traceSmoothSpline(ctx, stemShadowPts, n, true);
   ctx.lineWidth = 2.2;
   ctx.stroke();
 
-  // Fine longitudinal colored-pencil fiber lines
   ctx.strokeStyle = rgbToCss(palette.stemOutline, 0.2);
   ctx.lineWidth = 0.55;
   ctx.beginPath();
   for (const f of [-0.36, 0.16, 0.52] as const) {
-    const fiberPts: Point2D[] = [];
-    for (let i = 0; i < stem.length; i++) {
+    for (let i = 0; i < n; i++) {
       const node = stem[i];
       if (!node) continue;
       const nx = -node.ty;
       const ny = node.tx;
-      fiberPts.push({
-        x: node.x + nx * node.radius * f,
-        y: node.y + ny * node.radius * f,
-      });
+      const fp = stemFiberPts[i] as Point2D;
+      fp.x = node.x + nx * node.radius * f;
+      fp.y = node.y + ny * node.radius * f;
     }
-    traceSmoothSpline(ctx, fiberPts, true);
+    traceSmoothSpline(ctx, stemFiberPts, n, true);
   }
   ctx.stroke();
 
-  // Delicate diagonal colored-pencil shadow hatching along shaded right side
   ctx.strokeStyle = rgbToCss(palette.stemOutline, 0.22);
   ctx.lineWidth = 0.52;
-  const hatchStep = Math.max(2, Math.floor(stem.length / 20));
+  const hatchStep = Math.max(2, Math.floor(n / 20));
   ctx.beginPath();
-  for (let i = 2; i < stem.length - 1; i += hatchStep) {
+  for (let i = 2; i < n - 1; i += hatchStep) {
     const node = stem[i];
     if (!node) continue;
     const nx = -node.ty;
@@ -727,7 +741,6 @@ function drawStem(
   ctx.stroke();
   ctx.restore();
 
-  // Whisper-thin sepia-olive colored-pencil edges (NO thick black outlines!)
   ctx.save();
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
@@ -735,13 +748,13 @@ function drawStem(
   ctx.strokeStyle = rgbToCss(palette.stemOutline, 0.28);
   ctx.lineWidth = 0.6;
   ctx.beginPath();
-  traceSmoothSpline(ctx, leftPts, true);
+  traceSmoothSpline(ctx, stemLeftPts, n, true);
   ctx.stroke();
 
   ctx.strokeStyle = rgbToCss(palette.stemOutline, 0.42);
   ctx.lineWidth = 0.7;
   ctx.beginPath();
-  traceSmoothSpline(ctx, rightPts, true);
+  traceSmoothSpline(ctx, stemRightPts, n, true);
   ctx.stroke();
   ctx.restore();
 }
@@ -806,7 +819,6 @@ function buildLeafSilhouettePoints(leaf: LeafPose): {
       Math.sin(s ** 0.82 * Math.PI) * (0.58 + 0.22 * Math.sin(s * 9 + leaf.id * 1.9));
     const baseHalf = lerp(broadEnv * 1.08, wiltedEnv, curl) * W * 0.58;
 
-    // Expressive botanical cordate serration when lush; smooth edge ripple when wilted (always strictly > 0)
     const tipMask = Math.sin(s * Math.PI) ** 1.15;
     const lushTooth =
       (0.048 * Math.sin(s * Math.PI * 11 + leaf.id * 0.7) + 0.018 * Math.sin(s * Math.PI * 21)) *
@@ -814,7 +826,6 @@ function buildLeafSilhouettePoints(leaf: LeafPose): {
     const wiltedPinch = 0.1 * curl * Math.sin(s * 13 + leaf.id * 2.1);
     const serration = (lushTooth + wiltedPinch) * W * tipMask;
 
-    // Smoothly attenuated asymmetric crinkle kept strictly non-crossing so wilted tips never pinch/knot
     const crinkleU = curl * tipMask * (0.65 + 0.35 * Math.sin(s * 11 + leaf.id)) * 1.1;
     const crinkleD = curl * tipMask * (0.65 + 0.35 * Math.cos(s * 10 + leaf.id * 1.7)) * 1.1;
 
@@ -874,67 +885,77 @@ function buildLeafPath(points: readonly Point2D[]): Path2D {
   return path;
 }
 
-function drawLeaf(
+interface LeafSpriteEntry {
+  canvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+  bladePath: Path2D | null;
+  originX: number;
+  originY: number;
+  cssW: number;
+  cssH: number;
+  pixW: number;
+  pixH: number;
+  dpr: number;
+  length: number;
+  width: number;
+  curl: number;
+  turgor: number;
+  twist: number;
+  vitality: number;
+  colorMix: number;
+  baked: boolean;
+}
+
+const leafCacheByState = new WeakMap<SunflowerSimState, Map<number, LeafSpriteEntry>>();
+
+function getLeafSpriteEntry(state: SunflowerSimState, leafId: number): LeafSpriteEntry | null {
+  if (typeof document === "undefined") return null;
+  let map = leafCacheByState.get(state);
+  if (!map) {
+    map = new Map<number, LeafSpriteEntry>();
+    leafCacheByState.set(state, map);
+  }
+  let entry = map.get(leafId);
+  if (!entry) {
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    entry = {
+      canvas,
+      ctx,
+      bladePath: null,
+      originX: 0,
+      originY: 0,
+      cssW: 0,
+      cssH: 0,
+      pixW: 0,
+      pixH: 0,
+      dpr: 0,
+      length: 0,
+      width: 0,
+      curl: 0,
+      turgor: 0,
+      twist: 0,
+      vitality: 0,
+      colorMix: 0,
+      baked: false,
+    };
+    map.set(leafId, entry);
+  }
+  return entry;
+}
+
+function paintLeafBladeLocal(
   ctx: CanvasRenderingContext2D,
   leaf: LeafPose,
+  bladePath: Path2D,
+  midrib: readonly Point2D[],
+  upperSide: number,
+  topScale: number,
+  botScale: number,
   palette: SunflowerPalette,
-  cardPath: Path2D,
   vitality: number,
 ): void {
-  const { outline, midrib, upperSide, topScale, botScale } = buildLeafSilhouettePoints(leaf);
-  const bladePath = buildLeafPath(outline);
-
-  // Whisper-soft shadow outside card edges when widest leaves gently extend onto the page
-  const nearOutside =
-    Math.min(leaf.tip.x, leaf.petioleEnd.x) < BLEED_X + 14 ||
-    Math.max(leaf.tip.x, leaf.petioleEnd.x) > BLEED_X + CARD_WIDTH - 14 ||
-    Math.min(leaf.tip.y, leaf.petioleEnd.y) < BLEED_Y + 14;
-
-  if (nearOutside) {
-    ctx.save();
-    ctx.clip(getOutsideCardPath(cardPath), "evenodd");
-    ctx.translate(leaf.petioleEnd.x + 2, leaf.petioleEnd.y + 3.5);
-    ctx.rotate(leaf.angle);
-    ctx.shadowColor = "rgba(72, 62, 48, 0.14)";
-    ctx.shadowBlur = 5;
-    ctx.fillStyle = "rgba(82, 72, 58, 0.06)";
-    ctx.fill(bladePath);
-    ctx.restore();
-  }
-
-  // Graceful shaded botanical petiole (NO heavy black border!)
-  const midPetX = (leaf.attach.x + leaf.petioleEnd.x) * 0.5;
-  const midPetY = (leaf.attach.y + leaf.petioleEnd.y) * 0.5 + lerp(-6.2, -4.0, leaf.turgor);
-  const petW = lerp(1.3, 2.5, leaf.turgor) * (leaf.id >= 8 ? 0.8 : 1);
-
-  ctx.save();
-  ctx.lineCap = "round";
-  // Soft shadow underside
-  ctx.strokeStyle = rgbToCss(palette.stemOutline, 0.38);
-  ctx.lineWidth = petW + 0.7;
-  ctx.beginPath();
-  ctx.moveTo(leaf.attach.x, leaf.attach.y + 0.5);
-  ctx.quadraticCurveTo(midPetX, midPetY + 0.6, leaf.petioleEnd.x, leaf.petioleEnd.y + 0.4);
-  ctx.stroke();
-
-  // Main botanical petiole body
-  ctx.strokeStyle = rgbToCss(lerpRgb(palette.stemBase, palette.leafBase, 0.38), 0.94);
-  ctx.lineWidth = petW;
-  ctx.beginPath();
-  ctx.moveTo(leaf.attach.x, leaf.attach.y);
-  ctx.quadraticCurveTo(midPetX, midPetY, leaf.petioleEnd.x, leaf.petioleEnd.y);
-  ctx.stroke();
-
-  // Delicate sunlit upper ridge on petiole
-  ctx.strokeStyle = rgbToCss(palette.stemHighlight, 0.55);
-  ctx.lineWidth = Math.max(0.55, petW * 0.38);
-  ctx.beginPath();
-  ctx.moveTo(leaf.attach.x, leaf.attach.y - 0.4);
-  ctx.quadraticCurveTo(midPetX, midPetY - 0.5, leaf.petioleEnd.x, leaf.petioleEnd.y - 0.3);
-  ctx.stroke();
-  ctx.restore();
-
-  // Per-leaf botanical pigment variation driven by each leaf's own turgor so faster-wilting leaves dry earlier
   const leafVitality = clamp01(vitality * 0.32 + leaf.turgor * 0.68);
   const wiltedOliveBias = leaf.id % 3 === 1 ? (1 - leafVitality) * 0.46 : 0;
   const oliveWilted: RGB = { r: 82, g: 88, b: 56 };
@@ -958,11 +979,6 @@ function drawLeaf(
     }
   }
 
-  ctx.save();
-  ctx.translate(leaf.petioleEnd.x, leaf.petioleEnd.y);
-  ctx.rotate(leaf.angle);
-
-  // Rich botanical watercolor-pastel base gradient (deep shadowed base/lower half -> warm sunlit chartreuse tip/upper cheek)
   const leafGrad = ctx.createLinearGradient(
     -leaf.length * 0.08,
     -upperSide * leaf.width * 0.46,
@@ -980,18 +996,16 @@ function drawLeaf(
   ctx.save();
   ctx.clip(bladePath);
 
-  // Local-space colored-pencil hatch grain (moves naturally WITH the leaf!)
-  const hatchPat = getHatchPattern(ctx);
+  // Local-space colored-pencil hatch grain (source-over overlay, ZERO multiply!)
+  const hatchPat = getHatchOverlayPattern(ctx);
   if (hatchPat) {
     ctx.save();
-    ctx.globalCompositeOperation = "multiply";
-    ctx.globalAlpha = 0.28;
+    ctx.globalAlpha = 0.3;
     ctx.fillStyle = hatchPat;
-    ctx.fillRect(-leaf.length * 0.4, -leaf.width, leaf.length * 1.6, leaf.width * 2);
+    ctx.fillRect(-leaf.length * 0.35, -leaf.width * 0.85, leaf.length * 1.45, leaf.width * 1.7);
     ctx.restore();
   }
 
-  // Deep velvety cool moss-forest shadow tucked across the lower half of the midrib crease
   const lowerShadowGrad = ctx.createLinearGradient(0, 0, 0, -upperSide * leaf.width * 0.58);
   lowerShadowGrad.addColorStop(0, rgbToCss(shadowCol, lerp(0.46, 0.44, vitality)));
   lowerShadowGrad.addColorStop(0.65, rgbToCss(shadowCol, lerp(0.34, 0.28, vitality)));
@@ -1009,7 +1023,6 @@ function drawLeaf(
   ctx.closePath();
   ctx.fill();
 
-  // Deep heart-cleft ambient occlusion shadow where the basal lobes tuck around the petiole
   const cleftGrad = ctx.createRadialGradient(
     leaf.length * 0.04,
     0,
@@ -1027,7 +1040,6 @@ function drawLeaf(
   ctx.fillStyle = cleftGrad;
   ctx.fillRect(-leaf.length * 0.3, -leaf.width, leaf.length * 0.8, leaf.width * 2);
 
-  // Warm chartreuse-gold sunlit highlight blush across the upper lobe cheek
   const blushGrad = ctx.createRadialGradient(
     leaf.length * 0.4,
     upperSide * leaf.width * 0.24,
@@ -1045,7 +1057,6 @@ function drawLeaf(
   ctx.fillStyle = blushGrad;
   ctx.fillRect(-leaf.length * 0.3, -leaf.width, leaf.length * 1.4, leaf.width * 2);
 
-  // Rich directional colored-pencil hatching strokes following natural lateral vein sweep
   const hatchCount = 30;
   ctx.lineCap = "round";
 
@@ -1102,7 +1113,6 @@ function drawLeaf(
     ctx.stroke();
   }
 
-  // Delicate cross-hatch strokes tucked in the shaded basal cleft for book-illustration depth
   ctx.strokeStyle = rgbToCss(shadowCol, 0.24);
   ctx.lineWidth = 0.52;
   ctx.beginPath();
@@ -1113,12 +1123,11 @@ function drawLeaf(
   }
   ctx.stroke();
 
-  // Soft pale-chartreuse midrib vein (with sculpted mossy shadow tuck alongside, strictly clipped inside blade!)
   ctx.strokeStyle = rgbToCss(shadowCol, 0.42);
   ctx.lineWidth = lerp(1.1, 2.0, leaf.turgor);
   ctx.lineCap = "round";
   ctx.beginPath();
-  traceSmoothSpline(ctx, midrib, true, -upperSide * 0.8);
+  traceSmoothSpline(ctx, midrib, midrib.length, true, -upperSide * 0.8);
   ctx.stroke();
 
   ctx.strokeStyle = rgbToCss(
@@ -1127,10 +1136,9 @@ function drawLeaf(
   );
   ctx.lineWidth = lerp(0.75, 1.35, leaf.turgor);
   ctx.beginPath();
-  traceSmoothSpline(ctx, midrib, true);
+  traceSmoothSpline(ctx, midrib, midrib.length, true);
   ctx.stroke();
 
-  // Delicate basal heart-lobe veins & curved pinnate lateral veins (pale vein + whisper shadow tuck)
   const cordate = 1 - leaf.curl;
   if (cordate > 0.2 && m0) {
     ctx.strokeStyle = rgbToCss(shadowCol, 0.24);
@@ -1194,45 +1202,338 @@ function drawLeaf(
   }
   ctx.restore();
 
-  // Tactile colored-pencil forest-sepia edge (delicate alpha ~0.40, NEVER harsh black!)
   ctx.strokeStyle = rgbToCss(lerpRgb(palette.outlineInk, shadowCol, 0.48), 0.42);
   ctx.lineWidth = 0.68;
   ctx.lineJoin = "round";
   ctx.stroke(bladePath);
+}
+
+function getLeafDirtyScore(
+  entry: LeafSpriteEntry,
+  leaf: LeafPose,
+  vitality: number,
+  dpr: number,
+  fastScrub: boolean,
+): number {
+  if (!entry.baked || entry.dpr !== dpr) return 1000;
+  const lenTol = fastScrub ? 1.8 : 0.6;
+  const widTol = fastScrub ? 1.8 : 0.6;
+  const valTol = fastScrub ? 0.045 : 0.016;
+  const score = Math.max(
+    Math.abs(leaf.length - entry.length) / lenTol,
+    Math.abs(leaf.width - entry.width) / widTol,
+    Math.abs(leaf.curl - entry.curl) / valTol,
+    Math.abs(leaf.turgor - entry.turgor) / valTol,
+    Math.abs(vitality - entry.vitality) / valTol,
+    Math.abs(leaf.twist - entry.twist) / (valTol * 1.4),
+  );
+  return score >= 1 ? score : 0;
+}
+
+function bakeLeafSprite(
+  entry: LeafSpriteEntry,
+  leaf: LeafPose,
+  palette: SunflowerPalette,
+  vitality: number,
+  dpr: number,
+): void {
+  const { outline, midrib, upperSide, topScale, botScale } = buildLeafSilhouettePoints(leaf);
+  const bladePath = buildLeafPath(outline);
+
+  const originX = Math.ceil(leaf.length * 0.28 + 10);
+  const originY = Math.ceil(leaf.width * 0.72 + leaf.length * 0.18 + 14);
+  const cssW = originX + Math.ceil(leaf.length + 12);
+  const cssH = originY * 2;
+  const pixW = Math.ceil(cssW * dpr);
+  const pixH = Math.ceil(cssH * dpr);
+
+  // Grow-only bucketed backing store avoids GPU texture reallocation while scrubbing
+  if (entry.canvas.width < pixW || entry.canvas.height < pixH) {
+    entry.canvas.width = Math.max(entry.canvas.width, Math.ceil(pixW / 64) * 64);
+    entry.canvas.height = Math.max(entry.canvas.height, Math.ceil(pixH / 64) * 64);
+  } else {
+    entry.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    entry.ctx.clearRect(0, 0, Math.max(pixW, entry.pixW), Math.max(pixH, entry.pixH));
+  }
+
+  const lctx = entry.ctx;
+  lctx.save();
+  lctx.setTransform(dpr, 0, 0, dpr, originX * dpr, originY * dpr);
+  paintLeafBladeLocal(
+    lctx,
+    leaf,
+    bladePath,
+    midrib,
+    upperSide,
+    topScale,
+    botScale,
+    palette,
+    vitality,
+  );
+  lctx.restore();
+
+  entry.bladePath = bladePath;
+  entry.originX = originX;
+  entry.originY = originY;
+  entry.cssW = cssW;
+  entry.cssH = cssH;
+  entry.pixW = pixW;
+  entry.pixH = pixH;
+  entry.dpr = dpr;
+  entry.length = leaf.length;
+  entry.width = leaf.width;
+  entry.curl = leaf.curl;
+  entry.turgor = leaf.turgor;
+  entry.twist = leaf.twist;
+  entry.vitality = vitality;
+  entry.colorMix = leaf.colorMix;
+  entry.baked = true;
+}
+
+function refreshLeafSprites(
+  state: SunflowerSimState,
+  palette: SunflowerPalette,
+  vitality: number,
+  dpr: number,
+): void {
+  const { leaves } = state;
+  const fastScrub = state.dragging || Math.abs(state.valueVelocity) > 2;
+  const maxBakes = fastScrub ? 4 : leaves.length;
+
+  // Always bake any unbaked leaves immediately; budget incremental updates during rapid scrubbing
+  const dirty: { leaf: LeafPose; entry: LeafSpriteEntry; score: number }[] = [];
+  for (let i = 0; i < leaves.length; i++) {
+    const leaf = leaves[i];
+    if (!leaf) continue;
+    const entry = getLeafSpriteEntry(state, leaf.id);
+    if (!entry) continue;
+    const score = getLeafDirtyScore(entry, leaf, vitality, dpr, fastScrub);
+    if (score > 0) {
+      dirty.push({ leaf, entry, score });
+    }
+  }
+
+  if (dirty.length === 0) return;
+  if (dirty.length > maxBakes) {
+    dirty.sort((a, b) => b.score - a.score);
+  }
+
+  let bakesDone = 0;
+  for (let i = 0; i < dirty.length; i++) {
+    const item = dirty[i];
+    if (!item) continue;
+    if (bakesDone >= maxBakes && item.entry.baked) break;
+    bakeLeafSprite(item.entry, item.leaf, palette, vitality, dpr);
+    bakesDone++;
+  }
+}
+
+function drawOutsideLeafShadows(
+  ctx: CanvasRenderingContext2D,
+  state: SunflowerSimState,
+  cardPath: Path2D,
+): void {
+  const { leaves } = state;
+  let anyNearOutside = false;
+  for (let i = 0; i < leaves.length; i++) {
+    const leaf = leaves[i];
+    if (!leaf) continue;
+    if (
+      Math.min(leaf.tip.x, leaf.petioleEnd.x) < BLEED_X + 14 ||
+      Math.max(leaf.tip.x, leaf.petioleEnd.x) > BLEED_X + CARD_WIDTH - 14 ||
+      Math.min(leaf.tip.y, leaf.petioleEnd.y) < BLEED_Y + 14
+    ) {
+      anyNearOutside = true;
+      break;
+    }
+  }
+  if (!anyNearOutside) return;
+
+  // Single evenodd clip + 2 soft layered fills (ZERO shadowBlur passes!)
+  ctx.save();
+  ctx.clip(getOutsideCardPath(cardPath), "evenodd");
+
+  for (let i = 0; i < leaves.length; i++) {
+    const leaf = leaves[i];
+    if (!leaf) continue;
+    const nearOutside =
+      Math.min(leaf.tip.x, leaf.petioleEnd.x) < BLEED_X + 14 ||
+      Math.max(leaf.tip.x, leaf.petioleEnd.x) > BLEED_X + CARD_WIDTH - 14 ||
+      Math.min(leaf.tip.y, leaf.petioleEnd.y) < BLEED_Y + 14;
+    if (!nearOutside) continue;
+
+    const entry = getLeafSpriteEntry(state, leaf.id);
+    const bladePath = entry?.bladePath;
+    if (!bladePath || !entry) continue;
+
+    const sx = entry.length > 0.1 ? leaf.length / entry.length : 1;
+    const sy = entry.width > 0.1 ? leaf.width / entry.width : 1;
+
+    ctx.save();
+    ctx.translate(leaf.petioleEnd.x + 2, leaf.petioleEnd.y + 3.5);
+    ctx.rotate(leaf.angle);
+    ctx.scale(sx * 1.04, sy * 1.06);
+    ctx.fillStyle = "rgba(72, 62, 48, 0.042)";
+    ctx.fill(bladePath);
+    ctx.scale(0.96, 0.94);
+    ctx.fillStyle = "rgba(72, 62, 48, 0.055)";
+    ctx.fill(bladePath);
+    ctx.restore();
+  }
 
   ctx.restore();
 }
 
-interface Projected3D {
-  x: number;
-  y: number;
-  z: number;
+function drawBatchedPetioles(
+  ctx: CanvasRenderingContext2D,
+  leaves: readonly LeafPose[],
+  palette: SunflowerPalette,
+  vitality: number,
+): void {
+  if (leaves.length === 0) return;
+
+  const petW = lerp(1.3, 2.4, vitality);
+  ctx.lineCap = "round";
+
+  const shadowPath = new Path2D();
+  const bodyPath = new Path2D();
+  const hiPath = new Path2D();
+
+  for (let i = 0; i < leaves.length; i++) {
+    const leaf = leaves[i];
+    if (!leaf) continue;
+    const midPetX = (leaf.attach.x + leaf.petioleEnd.x) * 0.5;
+    const midPetY = (leaf.attach.y + leaf.petioleEnd.y) * 0.5 + lerp(-6.2, -4.0, leaf.turgor);
+
+    shadowPath.moveTo(leaf.attach.x, leaf.attach.y + 0.5);
+    shadowPath.quadraticCurveTo(midPetX, midPetY + 0.6, leaf.petioleEnd.x, leaf.petioleEnd.y + 0.4);
+
+    bodyPath.moveTo(leaf.attach.x, leaf.attach.y);
+    bodyPath.quadraticCurveTo(midPetX, midPetY, leaf.petioleEnd.x, leaf.petioleEnd.y);
+
+    hiPath.moveTo(leaf.attach.x, leaf.attach.y - 0.4);
+    hiPath.quadraticCurveTo(midPetX, midPetY - 0.5, leaf.petioleEnd.x, leaf.petioleEnd.y - 0.3);
+  }
+
+  ctx.strokeStyle = rgbToCss(palette.stemOutline, 0.38);
+  ctx.lineWidth = petW + 0.7;
+  ctx.stroke(shadowPath);
+
+  ctx.strokeStyle = rgbToCss(lerpRgb(palette.stemBase, palette.leafBase, 0.38), 0.94);
+  ctx.lineWidth = petW;
+  ctx.stroke(bodyPath);
+
+  ctx.strokeStyle = rgbToCss(palette.stemHighlight, 0.55);
+  ctx.lineWidth = Math.max(0.55, petW * 0.38);
+  ctx.stroke(hiPath);
 }
 
-function projectHeadPoint(head: HeadPose, px: number, py: number, pz: number): Projected3D {
+function drawLeafFromCache(
+  ctx: CanvasRenderingContext2D,
+  state: SunflowerSimState,
+  leaf: LeafPose,
+  palette: SunflowerPalette,
+  vitality: number,
+): void {
+  const entry = getLeafSpriteEntry(state, leaf.id);
+  if (entry?.baked) {
+    const sx = entry.length > 0.1 ? leaf.length / entry.length : 1;
+    const sy = entry.width > 0.1 ? leaf.width / entry.width : 1;
+
+    ctx.save();
+    ctx.translate(leaf.petioleEnd.x, leaf.petioleEnd.y);
+    ctx.rotate(leaf.angle);
+    if (Math.abs(sx - 1) > 0.004 || Math.abs(sy - 1) > 0.004) {
+      ctx.scale(sx, sy);
+    }
+    ctx.drawImage(
+      entry.canvas,
+      0,
+      0,
+      entry.pixW,
+      entry.pixH,
+      -entry.originX,
+      -entry.originY,
+      entry.cssW,
+      entry.cssH,
+    );
+    ctx.restore();
+    return;
+  }
+
+  // Fallback for non-DOM environments
+  const { outline, midrib, upperSide, topScale, botScale } = buildLeafSilhouettePoints(leaf);
+  const bladePath = buildLeafPath(outline);
+  ctx.save();
+  ctx.translate(leaf.petioleEnd.x, leaf.petioleEnd.y);
+  ctx.rotate(leaf.angle);
+  paintLeafBladeLocal(
+    ctx,
+    leaf,
+    bladePath,
+    midrib,
+    upperSide,
+    topScale,
+    botScale,
+    palette,
+    vitality,
+  );
+  ctx.restore();
+}
+
+interface HeadProjection {
+  cx: number;
+  cy: number;
+  m00: number;
+  m01: number;
+  m02: number;
+  m10: number;
+  m11: number;
+  m12: number;
+}
+
+function createHeadProjection(head: HeadPose): HeadProjection {
   const alpha = -head.pitch;
   const cosA = Math.cos(alpha);
   const sinA = Math.sin(alpha);
-  const y1 = py * cosA + pz * sinA;
-  const z1 = -py * sinA + pz * cosA;
-
   const cosY = Math.cos(head.yaw);
   const sinY = Math.sin(head.yaw);
-  const x2 = px * cosY + z1 * sinY;
-  const z2 = -px * sinY + z1 * cosY;
-
   const cosR = Math.cos(head.roll);
   const sinR = Math.sin(head.roll);
+
+  // Composition of pitch (X), yaw (Y), roll (Z) matching original projectHeadPoint identically:
+  // y1 = py*cosA + pz*sinA; z1 = -py*sinA + pz*cosA
+  // x2 = px*cosY + z1*sinY
+  // x = cx + x2*cosR - y1*sinR
+  // y = cy + x2*sinR + y1*cosR
+  const x2x = cosY;
+  const x2y = -sinA * sinY;
+  const x2z = cosA * sinY;
+
   return {
-    x: head.center.x + x2 * cosR - y1 * sinR,
-    y: head.center.y + x2 * sinR + y1 * cosR,
-    z: z2,
+    cx: head.center.x,
+    cy: head.center.y,
+    m00: x2x * cosR,
+    m01: x2y * cosR - cosA * sinR,
+    m02: x2z * cosR - sinA * sinR,
+    m10: x2x * sinR,
+    m11: x2y * sinR + cosA * cosR,
+    m12: x2z * sinR + sinA * cosR,
   };
+}
+
+function projX(p: HeadProjection, x: number, y: number, z: number): number {
+  return p.cx + p.m00 * x + p.m01 * y + p.m02 * z;
+}
+
+function projY(p: HeadProjection, x: number, y: number, z: number): number {
+  return p.cy + p.m10 * x + p.m11 * y + p.m12 * z;
 }
 
 function drawCalyxCup(
   ctx: CanvasRenderingContext2D,
   head: HeadPose,
+  proj: HeadProjection,
   palette: SunflowerPalette,
 ): void {
   const alpha = -head.pitch;
@@ -1241,31 +1542,35 @@ function drawCalyxCup(
 
   const r = head.diskRadius * 1.06;
   const rimZ = 0.6;
-  const backApex = projectHeadPoint(head, 0, 0, -head.diskRadius * 0.94);
+  const backApexX = projX(proj, 0, 0, -head.diskRadius * 0.94);
+  const backApexY = projY(proj, 0, 0, -head.diskRadius * 0.94);
   const neckPt = head.neck;
 
-  const leftRim = projectHeadPoint(head, -r, 0, rimZ);
-  const rightRim = projectHeadPoint(head, r, 0, rimZ);
-  const frontRim = projectHeadPoint(head, 0, -r * 0.94, rimZ + 0.5);
+  const leftRimX = projX(proj, -r, 0, rimZ);
+  const leftRimY = projY(proj, -r, 0, rimZ);
+  const rightRimX = projX(proj, r, 0, rimZ);
+  const rightRimY = projY(proj, r, 0, rimZ);
+  const frontRimX = projX(proj, 0, -r * 0.94, rimZ + 0.5);
+  const frontRimY = projY(proj, 0, -r * 0.94, rimZ + 0.5);
 
   const cupPath = new Path2D();
-  cupPath.moveTo(leftRim.x, leftRim.y);
+  cupPath.moveTo(leftRimX, leftRimY);
   cupPath.quadraticCurveTo(
-    lerp(leftRim.x, neckPt.x, 0.54),
-    lerp(leftRim.y, backApex.y, 0.78),
+    lerp(leftRimX, neckPt.x, 0.54),
+    lerp(leftRimY, backApexY, 0.78),
     neckPt.x,
     neckPt.y,
   );
   cupPath.quadraticCurveTo(
-    lerp(rightRim.x, neckPt.x, 0.54),
-    lerp(rightRim.y, backApex.y, 0.78),
-    rightRim.x,
-    rightRim.y,
+    lerp(rightRimX, neckPt.x, 0.54),
+    lerp(rightRimY, backApexY, 0.78),
+    rightRimX,
+    rightRimY,
   );
-  cupPath.quadraticCurveTo(frontRim.x, frontRim.y + 1.5, leftRim.x, leftRim.y);
+  cupPath.quadraticCurveTo(frontRimX, frontRimY + 1.5, leftRimX, leftRimY);
   cupPath.closePath();
 
-  const cupGrad = ctx.createLinearGradient(neckPt.x, neckPt.y, frontRim.x, frontRim.y + 6);
+  const cupGrad = ctx.createLinearGradient(neckPt.x, neckPt.y, frontRimX, frontRimY + 6);
   cupGrad.addColorStop(0, rgbToCss(lerpRgb(palette.stemBase, palette.sepalFill, 0.45)));
   cupGrad.addColorStop(0.55, rgbToCss(palette.sepalFill));
   cupGrad.addColorStop(1, rgbToCss(lerpRgb(palette.sepalFill, palette.outlineInk, 0.3)));
@@ -1278,144 +1583,130 @@ function drawCalyxCup(
   ctx.save();
   ctx.clip(cupPath);
 
-  // Subtle colored-pencil ribbing strokes radiating down the calyx dome
   ctx.strokeStyle = rgbToCss(palette.outlineInk, 0.22);
   ctx.lineWidth = 0.58;
+  ctx.beginPath();
   for (let i = -4; i <= 4; i++) {
     const ox = i * 4.4;
-    ctx.beginPath();
     ctx.moveTo(neckPt.x + ox * 0.22, neckPt.y);
     ctx.quadraticCurveTo(
-      backApex.x + ox * 0.68,
-      (neckPt.y + frontRim.y) * 0.5,
-      frontRim.x + ox * 1.1,
-      frontRim.y + 4,
+      backApexX + ox * 0.68,
+      (neckPt.y + frontRimY) * 0.5,
+      frontRimX + ox * 1.1,
+      frontRimY + 4,
     );
-    ctx.stroke();
   }
+  ctx.stroke();
 
-  // Soft sunlit highlight along left dome shoulder
   ctx.strokeStyle = rgbToCss(palette.stemHighlight, 0.34);
   ctx.lineWidth = 2.2;
   ctx.beginPath();
   ctx.moveTo(neckPt.x - 1.5, neckPt.y + 1);
   ctx.quadraticCurveTo(
-    lerp(leftRim.x, neckPt.x, 0.45),
-    (neckPt.y + leftRim.y) * 0.52,
-    leftRim.x + 4,
-    leftRim.y,
+    lerp(leftRimX, neckPt.x, 0.45),
+    (neckPt.y + leftRimY) * 0.52,
+    leftRimX + 4,
+    leftRimY,
   );
   ctx.stroke();
   ctx.restore();
 
-  // Whisper-soft sepia-olive calyx rim
   ctx.strokeStyle = rgbToCss(palette.outlineInk, 0.36);
   ctx.lineWidth = 0.65;
   ctx.stroke(cupPath);
   ctx.restore();
 }
 
+const BRACT_ANGLES = [Math.PI * 0.92, Math.PI * 0.08, Math.PI * 0.82, Math.PI * 0.18] as const;
+const BRACT_COS = BRACT_ANGLES.map((a) => Math.cos(a));
+const BRACT_SIN = BRACT_ANGLES.map((a) => Math.sin(a));
+const BRACT_LENGTHS = [1.24, 1.18, 0.94, 0.92] as const;
+
 function drawCradleBracts(
   ctx: CanvasRenderingContext2D,
   head: HeadPose,
+  proj: HeadProjection,
   palette: SunflowerPalette,
 ): void {
   const visibility = smoothstep(0.3, 0.85, head.bloomOpen);
   if (visibility <= 0.01) return;
 
-  const bractAngles = [Math.PI * 0.92, Math.PI * 0.08, Math.PI * 0.82, Math.PI * 0.18];
-  const bractLengths = [1.24, 1.18, 0.94, 0.92];
+  const baseR = head.diskRadius * 0.88;
+  const maxTipR = head.diskRadius + head.petalLength * 0.94 * 1.24;
+  const centerX = projX(proj, 0, 0, -5);
+  const centerY = projY(proj, 0, 0, -5);
+
+  const grad = ctx.createRadialGradient(centerX, centerY, baseR * 0.8, centerX, centerY, maxTipR);
+  grad.addColorStop(0, rgbToCss(palette.leafShadow));
+  grad.addColorStop(0.55, rgbToCss(palette.sepalFill));
+  grad.addColorStop(1, rgbToCss(palette.leafHighlight));
+
+  const bodyPath = new Path2D();
+  const veinPath = new Path2D();
+
+  for (let i = 0; i < 4; i++) {
+    const ca = BRACT_COS[i] ?? 1;
+    const sa = BRACT_SIN[i] ?? 0;
+    const px = -sa;
+    const py = ca;
+    const lenMul = BRACT_LENGTHS[i] ?? 1;
+    const tipR = head.diskRadius + head.petalLength * 0.94 * lenMul;
+    const midR = lerp(baseR, tipR, 0.42);
+    const halfW = (i < 2 ? 7.2 : 5.4) * visibility;
+
+    const bx = projX(proj, ca * baseR, sa * baseR, -6);
+    const by = projY(proj, ca * baseR, sa * baseR, -6);
+    const lx = projX(proj, ca * midR + px * halfW, sa * midR + py * halfW, -5);
+    const ly = projY(proj, ca * midR + px * halfW, sa * midR + py * halfW, -5);
+    const rx = projX(proj, ca * midR - px * halfW, sa * midR - py * halfW, -5);
+    const ry = projY(proj, ca * midR - px * halfW, sa * midR - py * halfW, -5);
+    const tx = projX(proj, ca * tipR, sa * tipR - (i < 2 ? 4 : 1), -4);
+    const ty = projY(proj, ca * tipR, sa * tipR - (i < 2 ? 4 : 1), -4);
+
+    bodyPath.moveTo(bx, by);
+    bodyPath.quadraticCurveTo(lx, ly, tx, ty);
+    bodyPath.quadraticCurveTo(rx, ry, bx, by);
+    bodyPath.closePath();
+
+    veinPath.moveTo(bx, by);
+    veinPath.lineTo(tx, ty);
+  }
 
   ctx.save();
   ctx.globalAlpha = visibility;
-  for (let i = 0; i < bractAngles.length; i++) {
-    const a = bractAngles[i] ?? 0;
-    const lenMul = bractLengths[i] ?? 1;
-    const baseR = head.diskRadius * 0.88;
-    const tipR = head.diskRadius + head.petalLength * 0.94 * lenMul;
-    const halfW = (i < 2 ? 7.2 : 5.4) * visibility;
-
-    const ca = Math.cos(a);
-    const sa = Math.sin(a);
-    const px = -sa;
-    const py = ca;
-
-    const pBase = projectHeadPoint(head, ca * baseR, sa * baseR, -6);
-    const pMidL = projectHeadPoint(
-      head,
-      ca * lerp(baseR, tipR, 0.42) + px * halfW,
-      sa * lerp(baseR, tipR, 0.42) + py * halfW,
-      -5,
-    );
-    const pMidR = projectHeadPoint(
-      head,
-      ca * lerp(baseR, tipR, 0.42) - px * halfW,
-      sa * lerp(baseR, tipR, 0.42) - py * halfW,
-      -5,
-    );
-    const pTip = projectHeadPoint(head, ca * tipR, sa * tipR - (i < 2 ? 4 : 1), -4);
-
-    const grad = ctx.createLinearGradient(pBase.x, pBase.y, pTip.x, pTip.y);
-    grad.addColorStop(0, rgbToCss(palette.leafShadow));
-    grad.addColorStop(0.55, rgbToCss(palette.sepalFill));
-    grad.addColorStop(1, rgbToCss(palette.leafHighlight));
-
-    ctx.fillStyle = grad;
-    ctx.strokeStyle = rgbToCss(lerpRgb(palette.outlineInk, palette.leafShadow, 0.4), 0.36);
-    ctx.lineWidth = 0.6;
-    ctx.beginPath();
-    ctx.moveTo(pBase.x, pBase.y);
-    ctx.quadraticCurveTo(pMidL.x, pMidL.y, pTip.x, pTip.y);
-    ctx.quadraticCurveTo(pMidR.x, pMidR.y, pBase.x, pBase.y);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-
-    // Soft pale central bract vein
-    ctx.strokeStyle = rgbToCss(palette.leafVein, 0.48);
-    ctx.lineWidth = 0.55;
-    ctx.beginPath();
-    ctx.moveTo(pBase.x, pBase.y);
-    ctx.lineTo(pTip.x, pTip.y);
-    ctx.stroke();
-  }
+  ctx.fillStyle = grad;
+  ctx.fill(bodyPath);
+  ctx.strokeStyle = rgbToCss(lerpRgb(palette.outlineInk, palette.leafShadow, 0.4), 0.36);
+  ctx.lineWidth = 0.6;
+  ctx.stroke(bodyPath);
+  ctx.strokeStyle = rgbToCss(palette.leafVein, 0.48);
+  ctx.lineWidth = 0.55;
+  ctx.stroke(veinPath);
   ctx.restore();
 }
 
-function drawSepalItem(
+function drawBatchedSepals(
   ctx: CanvasRenderingContext2D,
   head: HeadPose,
-  spec: SepalSpec,
+  proj: HeadProjection,
   palette: SunflowerPalette,
 ): void {
-  const ca = Math.cos(spec.angle);
-  const sa = Math.sin(spec.angle);
-  const px = -sa;
-  const py = ca;
-
   const baseR = head.diskRadius * 0.9;
-  const sepalLen = lerp(15, 17, head.bloomOpen) * spec.lengthMul;
-  const halfW = lerp(4.0, 5.0, head.bloomOpen) * spec.widthMul;
-  const outDist = baseR + sepalLen * lerp(0.96, 0.72, head.bloomOpen);
-  // Subtle curled dry sepal flare when wilted, hugging the unified calyx-disk rim plane
-  const tipZ = lerp(sepalLen * 0.16, -2.5, head.bloomOpen);
+  const baseSepalLen = lerp(15, 17, head.bloomOpen);
+  const baseHalfW = lerp(4.0, 5.0, head.bloomOpen);
+  const outRatio = lerp(0.96, 0.72, head.bloomOpen);
+  const bloomOpen = head.bloomOpen;
 
-  const pBase = projectHeadPoint(head, ca * baseR, sa * baseR, -0.8);
-  const pMidL = projectHeadPoint(
-    head,
-    ca * lerp(baseR, outDist, 0.45) + px * halfW,
-    sa * lerp(baseR, outDist, 0.45) + py * halfW,
-    -0.4,
+  const centerX = projX(proj, 0, 0, -0.6);
+  const centerY = projY(proj, 0, 0, -0.6);
+  const grad = ctx.createRadialGradient(
+    centerX,
+    centerY,
+    baseR * 0.85,
+    centerX,
+    centerY,
+    baseR + baseSepalLen * 1.15,
   );
-  const pMidR = projectHeadPoint(
-    head,
-    ca * lerp(baseR, outDist, 0.45) - px * halfW,
-    sa * lerp(baseR, outDist, 0.45) - py * halfW,
-    -0.4,
-  );
-  const pTip = projectHeadPoint(head, ca * outDist, sa * outDist, tipZ);
-
-  const grad = ctx.createLinearGradient(pBase.x, pBase.y, pTip.x, pTip.y);
   grad.addColorStop(0, rgbToCss(lerpRgb(palette.sepalFill, palette.leafShadow, 0.35)));
   grad.addColorStop(0.65, rgbToCss(palette.sepalFill));
   grad.addColorStop(1, rgbToCss(lerpRgb(palette.sepalFill, palette.leafHighlight, 0.25)));
@@ -1425,110 +1716,168 @@ function drawSepalItem(
   ctx.strokeStyle = rgbToCss(lerpRgb(palette.outlineInk, palette.leafShadow, 0.35), 0.38);
   ctx.lineWidth = 0.58;
   ctx.beginPath();
-  ctx.moveTo(pBase.x, pBase.y);
-  ctx.quadraticCurveTo(pMidL.x, pMidL.y, pTip.x, pTip.y);
-  ctx.quadraticCurveTo(pMidR.x, pMidR.y, pBase.x, pBase.y);
-  ctx.closePath();
+
+  for (let i = 0; i < SEPAL_SPECS.length; i++) {
+    const spec = SEPAL_SPECS[i];
+    if (!spec) continue;
+    const ca = spec.cosA;
+    const sa = spec.sinA;
+    const px = -sa;
+    const py = ca;
+
+    const sepalLen = baseSepalLen * spec.lengthMul;
+    const halfW = baseHalfW * spec.widthMul;
+    const outDist = baseR + sepalLen * outRatio;
+    const midDist = lerp(baseR, outDist, 0.45);
+    const tipZ = lerp(sepalLen * 0.16, -2.5, bloomOpen);
+
+    const bx = projX(proj, ca * baseR, sa * baseR, -0.8);
+    const by = projY(proj, ca * baseR, sa * baseR, -0.8);
+    const lx = projX(proj, ca * midDist + px * halfW, sa * midDist + py * halfW, -0.4);
+    const ly = projY(proj, ca * midDist + px * halfW, sa * midDist + py * halfW, -0.4);
+    const rx = projX(proj, ca * midDist - px * halfW, sa * midDist - py * halfW, -0.4);
+    const ry = projY(proj, ca * midDist - px * halfW, sa * midDist - py * halfW, -0.4);
+    const tx = projX(proj, ca * outDist, sa * outDist, tipZ);
+    const ty = projY(proj, ca * outDist, sa * outDist, tipZ);
+
+    ctx.moveTo(bx, by);
+    ctx.quadraticCurveTo(lx, ly, tx, ty);
+    ctx.quadraticCurveTo(rx, ry, bx, by);
+    ctx.closePath();
+  }
+
   ctx.fill();
   ctx.stroke();
   ctx.restore();
 }
 
-function drawPetalItem(
+function drawPetalRing(
   ctx: CanvasRenderingContext2D,
   head: HeadPose,
-  spec: PetalSpec,
-  bank: BotanicalSpriteBank,
+  proj: HeadProjection,
+  specs: readonly PetalSpec[],
+  atlas: HTMLCanvasElement,
   petalT: number,
+  dpr: number,
 ): void {
-  const angle = spec.angle + spec.bendBias * head.petalCurl * 0.42;
-  const ca = Math.cos(angle);
-  const sa = Math.sin(angle);
-  const px = -sa;
-  const py = ca;
-
-  const baseR = head.diskRadius * (spec.ring === 0 ? 0.84 : 0.9);
-  const len = head.petalLength * spec.lengthMul;
-  const halfW = lerp(4.8, 10.6, head.bloomOpen) * spec.widthMul * (1 - head.petalCurl * 0.24);
-
-  // When wilted & hanging down, upper-front petals curve out and gently downward framing the upper rim
-  // of the dark seed disk, while side and back petals flare & hang down in a weathered drooping bell.
-  const frontRimMask = clamp01(-sa) * smoothstep(0.28, 1.15, -head.pitch);
-  const outFrac = lerp(1.0, lerp(0.78, 0.44, frontRimMask), head.petalDroop);
-  const tipOut = baseR + len * outFrac;
-  const midOut = baseR + len * 0.48 * outFrac;
-
-  const droopLift = lerp(0.74, 0.62, frontRimMask);
-  const baseZ = spec.ring === 0 ? -0.4 : 0.4;
-  const midZ =
-    baseZ +
-    len * head.petalDroop * droopLift * 0.46 -
-    (1 - head.petalDroop) * (spec.ring === 0 ? 1.4 : 0.4);
-  const tipZ =
-    baseZ + len * (head.petalDroop * droopLift + head.petalCurl * 0.1 * (1 + spec.curlBias));
-  const curlSide = spec.curlBias * head.petalCurl * 4.8;
-
-  const pBaseMid = projectHeadPoint(head, ca * baseR, sa * baseR, baseZ);
-  const pMidCenter = projectHeadPoint(head, ca * midOut, sa * midOut, midZ);
-  const pMidSide = projectHeadPoint(head, ca * midOut + px * halfW, sa * midOut + py * halfW, midZ);
-  const pTip = projectHeadPoint(
-    head,
-    ca * tipOut + px * curlSide,
-    sa * tipOut + py * curlSide,
-    tipZ,
-  );
-
-  const dx = pTip.x - pBaseMid.x;
-  const dy = pTip.y - pBaseMid.y;
-  const projLen = Math.hypot(dx, dy);
-  if (projLen < 2.2) return;
-
-  const projAngle = Math.atan2(dy, dx);
-  // Project transverse width perpendicular to the projected petal axis so 2.5D foreshortening is true
-  const axisX = dx / projLen;
-  const axisY = dy / projLen;
-  const sideDx = pMidSide.x - pMidCenter.x;
-  const sideDy = pMidSide.y - pMidCenter.y;
-  const projHalfW = Math.max(
-    halfW * 0.42,
-    Math.hypot(
-      sideDx - (sideDx * axisX + sideDy * axisY) * axisX,
-      sideDy - (sideDx * axisX + sideDy * axisY) * axisY,
-    ),
-  );
-
-  const scaleX = (projHalfW / PETAL_HALF_W) * spec.flipX;
-  const scaleY = projLen / PETAL_SPAN_Y;
-
-  const ringKey = spec.ring === 0 ? "back" : "front";
-  const v = spec.variant;
-
-  // Seamless opaque cross-fade across the 3 pre-baked colored-pencil palette keyframes (0 -> 0.5 -> 1.0)
-  let spriteA: HTMLCanvasElement | undefined;
-  let spriteB: HTMLCanvasElement | undefined;
-  let blend = 0;
-
+  let rowA: number;
+  let rowB: number;
+  let blend: number;
   if (petalT <= 0.5) {
-    spriteA = bank.petalsWilted[ringKey][v];
-    spriteB = bank.petalsMid[ringKey][v];
-    blend = clamp01(petalT / 0.5);
+    rowA = 0;
+    rowB = 1;
+    blend = clamp01(petalT * 2);
   } else {
-    spriteA = bank.petalsMid[ringKey][v];
-    spriteB = bank.petalsBloom[ringKey][v];
-    blend = clamp01((petalT - 0.5) / 0.5);
+    rowA = 1;
+    rowB = 2;
+    blend = clamp01((petalT - 0.5) * 2);
   }
 
-  if (!spriteA) return;
+  const drawSingleB = blend >= 0.985;
+  const drawBoth = blend > 0.015 && !drawSingleB;
+  const syA = (drawSingleB ? rowB : rowA) * PETAL_SPRITE_H;
+  const syB = rowB * PETAL_SPRITE_H;
+
+  const pitchDroopMask = smoothstep(0.28, 1.15, -head.pitch);
+  const baseHalfWBase = lerp(4.8, 10.6, head.bloomOpen) * (1 - head.petalCurl * 0.24);
+  const invPetalHalfW = 1 / PETAL_HALF_W;
+  const invPetalSpanY = 1 / PETAL_SPAN_Y;
 
   ctx.save();
-  ctx.translate(pBaseMid.x, pBaseMid.y);
-  ctx.rotate(projAngle - Math.PI * 0.5);
-  ctx.scale(scaleX, scaleY);
+  for (let i = 0; i < specs.length; i++) {
+    const spec = specs[i];
+    if (!spec) continue;
 
-  ctx.drawImage(spriteA, -PETAL_BASE_X, -PETAL_BASE_Y, PETAL_SPRITE_W, PETAL_SPRITE_H);
-  if (spriteB && blend > 0.01) {
-    ctx.globalAlpha = blend;
-    ctx.drawImage(spriteB, -PETAL_BASE_X, -PETAL_BASE_Y, PETAL_SPRITE_W, PETAL_SPRITE_H);
+    const angle = spec.angle + spec.bendBias * head.petalCurl * 0.42;
+    const ca = Math.cos(angle);
+    const sa = Math.sin(angle);
+    const px = -sa;
+    const py = ca;
+
+    const baseR = head.diskRadius * (spec.ring === 0 ? 0.84 : 0.9);
+    const len = head.petalLength * spec.lengthMul;
+    const halfW = baseHalfWBase * spec.widthMul;
+
+    const frontRimMask = clamp01(-sa) * pitchDroopMask;
+    const outFrac = lerp(1.0, lerp(0.78, 0.44, frontRimMask), head.petalDroop);
+    const tipOut = baseR + len * outFrac;
+    const midOut = baseR + len * 0.48 * outFrac;
+
+    const droopLift = lerp(0.74, 0.62, frontRimMask);
+    const baseZ = spec.ring === 0 ? -0.4 : 0.4;
+    const midZ =
+      baseZ +
+      len * head.petalDroop * droopLift * 0.46 -
+      (1 - head.petalDroop) * (spec.ring === 0 ? 1.4 : 0.4);
+    const tipZ =
+      baseZ + len * (head.petalDroop * droopLift + head.petalCurl * 0.1 * (1 + spec.curlBias));
+    const curlSide = spec.curlBias * head.petalCurl * 4.8;
+
+    const bmx = projX(proj, ca * baseR, sa * baseR, baseZ);
+    const bmy = projY(proj, ca * baseR, sa * baseR, baseZ);
+    const mcx = projX(proj, ca * midOut, sa * midOut, midZ);
+    const mcy = projY(proj, ca * midOut, sa * midOut, midZ);
+    const msx = projX(proj, ca * midOut + px * halfW, sa * midOut + py * halfW, midZ);
+    const msy = projY(proj, ca * midOut + px * halfW, sa * midOut + py * halfW, midZ);
+    const tpx = projX(proj, ca * tipOut + px * curlSide, sa * tipOut + py * curlSide, tipZ);
+    const tpy = projY(proj, ca * tipOut + px * curlSide, sa * tipOut + py * curlSide, tipZ);
+
+    const dx = tpx - bmx;
+    const dy = tpy - bmy;
+    const projLen = Math.hypot(dx, dy);
+    if (projLen < 2.2) continue;
+
+    const axisX = dx / projLen;
+    const axisY = dy / projLen;
+    const sideDx = msx - mcx;
+    const sideDy = msy - mcy;
+    const dot = sideDx * axisX + sideDy * axisY;
+    const projHalfW = Math.max(
+      halfW * 0.42,
+      Math.hypot(sideDx - dot * axisX, sideDy - dot * axisY),
+    );
+
+    const scaleX = projHalfW * invPetalHalfW * spec.flipX;
+    const scaleY = projLen * invPetalSpanY;
+
+    // Direct 2D affine matrix for translate(bmx,bmy) * rotate(projAngle - π/2) * scale(scaleX,scaleY)
+    ctx.setTransform(
+      dpr * scaleX * axisY,
+      dpr * scaleX * -axisX,
+      dpr * scaleY * axisX,
+      dpr * scaleY * axisY,
+      dpr * bmx,
+      dpr * bmy,
+    );
+
+    const sx = ((spec.ring === 0 ? 0 : 4) + spec.variant) * PETAL_SPRITE_W;
+
+    ctx.globalAlpha = 1;
+    ctx.drawImage(
+      atlas,
+      sx,
+      syA,
+      PETAL_SPRITE_W,
+      PETAL_SPRITE_H,
+      -PETAL_BASE_X,
+      -PETAL_BASE_Y,
+      PETAL_SPRITE_W,
+      PETAL_SPRITE_H,
+    );
+    if (drawBoth) {
+      ctx.globalAlpha = blend;
+      ctx.drawImage(
+        atlas,
+        sx,
+        syB,
+        PETAL_SPRITE_W,
+        PETAL_SPRITE_H,
+        -PETAL_BASE_X,
+        -PETAL_BASE_Y,
+        PETAL_SPRITE_W,
+        PETAL_SPRITE_H,
+      );
+    }
   }
   ctx.restore();
 }
@@ -1536,22 +1885,25 @@ function drawPetalItem(
 function drawSeedDisk(
   ctx: CanvasRenderingContext2D,
   head: HeadPose,
+  proj: HeadProjection,
   palette: SunflowerPalette,
   bank: BotanicalSpriteBank,
   diskT: number,
 ): void {
   const r = head.diskRadius;
   const diskZ = 0.5;
-  const p0 = projectHeadPoint(head, 0, 0, diskZ);
-  const pX = projectHeadPoint(head, r, 0, diskZ);
-  const pY = projectHeadPoint(head, 0, r, diskZ);
+  const p0x = projX(proj, 0, 0, diskZ);
+  const p0y = projY(proj, 0, 0, diskZ);
+  const pXx = projX(proj, r, 0, diskZ);
+  const pXy = projY(proj, r, 0, diskZ);
+  const pYx = projX(proj, 0, r, diskZ);
+  const pYy = projY(proj, 0, r, diskZ);
 
-  const ux = (pX.x - p0.x) / DISK_RADIUS;
-  const uy = (pX.y - p0.y) / DISK_RADIUS;
-  let vx = (pY.x - p0.x) / DISK_RADIUS;
-  let vy = (pY.y - p0.y) / DISK_RADIUS;
+  const ux = (pXx - p0x) / DISK_RADIUS;
+  const uy = (pXy - p0y) / DISK_RADIUS;
+  let vx = (pYx - p0x) / DISK_RADIUS;
+  let vy = (pYy - p0y) / DISK_RADIUS;
 
-  // Keep only a razor-thin shadowed underside crescent when pitched straight down toward the ground at 0%
   const vLen = Math.hypot(vx, vy);
   const minV = (r * 0.11) / DISK_RADIUS;
   if (vLen > 0.0001 && vLen < minV) {
@@ -1566,23 +1918,26 @@ function drawSeedDisk(
   if (diskT <= 0.5) {
     spriteA = bank.diskWilted;
     spriteB = bank.diskMid;
-    blend = clamp01(diskT / 0.5);
+    blend = clamp01(diskT * 2);
   } else {
     spriteA = bank.diskMid;
     spriteB = bank.diskBloom;
-    blend = clamp01((diskT - 0.5) / 0.5);
+    blend = clamp01((diskT - 0.5) * 2);
   }
 
   ctx.save();
-  ctx.transform(ux, uy, vx, vy, p0.x, p0.y);
+  ctx.transform(ux, uy, vx, vy, p0x, p0y);
 
-  ctx.drawImage(spriteA, -DISK_CENTER, -DISK_CENTER, DISK_SPRITE_SIZE, DISK_SPRITE_SIZE);
-  if (blend > 0.01) {
-    ctx.globalAlpha = blend;
+  if (blend >= 0.985) {
     ctx.drawImage(spriteB, -DISK_CENTER, -DISK_CENTER, DISK_SPRITE_SIZE, DISK_SPRITE_SIZE);
+  } else {
+    ctx.drawImage(spriteA, -DISK_CENTER, -DISK_CENTER, DISK_SPRITE_SIZE, DISK_SPRITE_SIZE);
+    if (blend > 0.015) {
+      ctx.globalAlpha = blend;
+      ctx.drawImage(spriteB, -DISK_CENTER, -DISK_CENTER, DISK_SPRITE_SIZE, DISK_SPRITE_SIZE);
+    }
   }
 
-  // Soft warm ambient shadow cast across the upper rim when pitched downward under drooping petals
   const droopShadow = smoothstep(0.28, 1.2, -head.pitch);
   if (droopShadow > 0.02) {
     ctx.globalAlpha = 1;
@@ -1603,12 +1958,12 @@ function drawSunflowerHead(
   ctx: CanvasRenderingContext2D,
   state: SunflowerSimState,
   palette: SunflowerPalette,
+  dpr: number,
 ): void {
   const { head, phases, hoverHead, dragging } = state;
   const bank = getBotanicalSpriteBank();
   if (!bank) return;
 
-  // Barely-there warm sunlit lift when hovering or dragging (no sharp UI halo)
   if (hoverHead || dragging) {
     ctx.save();
     const liftR = head.radius * 1.18;
@@ -1631,29 +1986,25 @@ function drawSunflowerHead(
     ctx.restore();
   }
 
+  const proj = createHeadProjection(head);
   const petalT = clamp01(phases.warmth * 0.22 + phases.bloom * 0.78);
   const diskT = clamp01(phases.headLift * 0.36 + phases.bloom * 0.64);
 
-  // Strict botanical layering in static, frame-invariant radial order so petals never pop in breeze.
-  drawCalyxCup(ctx, head, palette);
-  drawCradleBracts(ctx, head, palette);
+  drawCalyxCup(ctx, head, proj, palette);
+  drawCradleBracts(ctx, head, proj, palette);
+  drawBatchedSepals(ctx, head, proj, palette);
 
-  for (let i = 0; i < SEPAL_SPECS.length; i++) {
-    const spec = SEPAL_SPECS[i];
-    if (spec) drawSepalItem(ctx, head, spec, palette);
-  }
+  drawPetalRing(ctx, head, proj, BACK_PETAL_SPECS, bank.petalAtlas, petalT, dpr);
+  drawPetalRing(ctx, head, proj, FRONT_PETAL_SPECS, bank.petalAtlas, petalT, dpr);
 
-  for (let i = 0; i < BACK_PETAL_SPECS.length; i++) {
-    const spec = BACK_PETAL_SPECS[i];
-    if (spec) drawPetalItem(ctx, head, spec, bank, petalT);
-  }
+  drawSeedDisk(ctx, head, proj, palette, bank, diskT);
+}
 
-  for (let i = 0; i < FRONT_PETAL_SPECS.length; i++) {
-    const spec = FRONT_PETAL_SPECS[i];
-    if (spec) drawPetalItem(ctx, head, spec, bank, petalT);
-  }
+const backLeavesScratch: LeafPose[] = [];
+const frontLeavesScratch: LeafPose[] = [];
 
-  drawSeedDisk(ctx, head, palette, bank, diskT);
+function compareLeafOrder(a: LeafPose, b: LeafPose): number {
+  return a.zOrder - b.zOrder || a.stemT - b.stemT;
 }
 
 export function paintSunflower(
@@ -1661,32 +2012,42 @@ export function paintSunflower(
   state: SunflowerSimState,
   palette: SunflowerPalette,
   cardPath: Path2D,
+  dpr = 1,
 ): void {
   const { stem, leaves, phases } = state;
   const vitality = clamp01(phases.warmth * 0.42 + phases.leafUnfurl * 0.58);
 
-  const backLeaves: LeafPose[] = [];
-  const frontLeaves: LeafPose[] = [];
+  refreshLeafSprites(state, palette, vitality, dpr);
+  drawOutsideLeafShadows(ctx, state, cardPath);
+
+  backLeavesScratch.length = 0;
+  frontLeavesScratch.length = 0;
   for (let i = 0; i < leaves.length; i++) {
     const leaf = leaves[i];
     if (!leaf) continue;
-    if (leaf.zOrder <= 0) backLeaves.push(leaf);
-    else frontLeaves.push(leaf);
+    if (leaf.zOrder <= 0) backLeavesScratch.push(leaf);
+    else frontLeavesScratch.push(leaf);
   }
-  backLeaves.sort((a, b) => a.zOrder - b.zOrder || a.stemT - b.stemT);
-  frontLeaves.sort((a, b) => a.zOrder - b.zOrder || a.stemT - b.stemT);
+  backLeavesScratch.sort(compareLeafOrder);
+  frontLeavesScratch.sort(compareLeafOrder);
 
-  for (let i = 0; i < backLeaves.length; i++) {
-    const leaf = backLeaves[i];
-    if (leaf) drawLeaf(ctx, leaf, palette, cardPath, vitality);
+  ctx.save();
+  drawBatchedPetioles(ctx, backLeavesScratch, palette, vitality);
+  for (let i = 0; i < backLeavesScratch.length; i++) {
+    const leaf = backLeavesScratch[i];
+    if (leaf) drawLeafFromCache(ctx, state, leaf, palette, vitality);
   }
+  ctx.restore();
 
   drawStem(ctx, stem, palette);
 
-  for (let i = 0; i < frontLeaves.length; i++) {
-    const leaf = frontLeaves[i];
-    if (leaf) drawLeaf(ctx, leaf, palette, cardPath, vitality);
+  ctx.save();
+  drawBatchedPetioles(ctx, frontLeavesScratch, palette, vitality);
+  for (let i = 0; i < frontLeavesScratch.length; i++) {
+    const leaf = frontLeavesScratch[i];
+    if (leaf) drawLeafFromCache(ctx, state, leaf, palette, vitality);
   }
+  ctx.restore();
 
-  drawSunflowerHead(ctx, state, palette);
+  drawSunflowerHead(ctx, state, palette, dpr);
 }

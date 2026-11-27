@@ -50,35 +50,52 @@ export function ExperimentStage({
 }: ExperimentStageProps) {
   const containerRef = useRef<HTMLElement | null>(null);
   const [active, setActive] = useState(standalone);
+  const [near, setNear] = useState(standalone);
 
   useEffect(() => {
     if (standalone) {
       setActive(true);
+      setNear(true);
       return;
     }
     const el = containerRef.current;
     if (!el || typeof IntersectionObserver === "undefined") {
       setActive(true);
+      setNear(true);
       return;
     }
-    const observer = new IntersectionObserver(
+    const activeObserver = new IntersectionObserver(
       (entries) => {
         const entry = entries[0];
         if (entry) {
           setActive(entry.isIntersecting);
         }
       },
-      { rootMargin: "120px 0px" },
+      { rootMargin: "0px" },
     );
-    observer.observe(el);
-    return () => observer.disconnect();
+    const preloadObserver = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (entry?.isIntersecting) {
+          setNear(true);
+          preloadObserver.disconnect();
+        }
+      },
+      { rootMargin: "160px 0px" },
+    );
+    activeObserver.observe(el);
+    preloadObserver.observe(el);
+    return () => {
+      activeObserver.disconnect();
+      preloadObserver.disconnect();
+    };
   }, [standalone]);
 
   useEffect(() => {
-    if (active) {
+    if (active || near) {
       experiment.preload();
     }
-  }, [active, experiment]);
+  }, [active, near, experiment]);
 
   const ExperimentComponent = experiment.Component;
   const Fallback = experiment.Fallback;

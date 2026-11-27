@@ -663,9 +663,9 @@ function evalStemAngle(t: number, sinPiT: number, params: RodBendParams): number
   return params.lowBow * sinPiT * (1 - 0.55 * s) + params.tipAngle * s;
 }
 
-function evalRodTipDy(u: number, stemLength: number): number {
+function evalUnitRodTipDy(u: number): number {
   const params = getRodBendParams(u);
-  const ds = stemLength / STEM_SEGMENTS;
+  const ds = 1 / STEM_SEGMENTS;
   let dy = 0;
   for (let i = 0; i < STEM_SEGMENTS; i++) {
     const tMid = STEM_MID_T[i] ?? 0.5;
@@ -675,22 +675,37 @@ function evalRodTipDy(u: number, stemLength: number): number {
   return dy;
 }
 
+const ROD_LUT_STEPS = 512;
+const ROD_UNIT_DY_LUT = Float64Array.from({ length: ROD_LUT_STEPS + 1 }, (_, i) =>
+  evalUnitRodTipDy((i / ROD_LUT_STEPS) * STEM_MAX_BEND_U),
+);
+
 function solveStemBendParam(targetNeckY: number, p0y: number, stemLength: number): number {
   const desiredDy = targetNeckY - p0y;
-  if (-stemLength >= desiredDy) {
+  if (-stemLength >= desiredDy || stemLength <= 0) {
     return 0;
   }
+  const targetUnitDy = desiredDy / stemLength;
+  const maxUnitDy = ROD_UNIT_DY_LUT[ROD_LUT_STEPS] ?? 1;
+  if (targetUnitDy >= maxUnitDy) {
+    return STEM_MAX_BEND_U;
+  }
+
   let lo = 0;
-  let hi = STEM_MAX_BEND_U;
-  for (let iter = 0; iter < 20; iter++) {
-    const mid = (lo + hi) * 0.5;
-    if (evalRodTipDy(mid, stemLength) < desiredDy) {
+  let hi = ROD_LUT_STEPS;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >>> 1;
+    if ((ROD_UNIT_DY_LUT[mid] ?? -1) < targetUnitDy) {
       lo = mid;
     } else {
       hi = mid;
     }
   }
-  return (lo + hi) * 0.5;
+  const dyLo = ROD_UNIT_DY_LUT[lo] ?? -1;
+  const dyHi = ROD_UNIT_DY_LUT[hi] ?? maxUnitDy;
+  const span = dyHi - dyLo;
+  const frac = span > 1e-12 ? clamp01((targetUnitDy - dyLo) / span) : 0;
+  return ((lo + frac) / ROD_LUT_STEPS) * STEM_MAX_BEND_U;
 }
 
 function buildStemAndPose(
