@@ -11,7 +11,10 @@ function isPlainLeftClick(event: MouseEvent<HTMLAnchorElement>): boolean {
 
 export function FeedHeader({ alias, onHomeClick }: FeedHeaderProps) {
   return (
-    <header className="pointer-events-none fixed inset-x-0 top-0 z-20 flex select-none items-center justify-between gap-4 pt-[max(1.25rem,env(safe-area-inset-top))] pr-[max(1.5rem,env(safe-area-inset-right))] pb-5 pl-[max(1.5rem,env(safe-area-inset-left))] font-mono text-[13px] tracking-[0.04em] text-muted">
+    <header
+      data-feed-header=""
+      className="pointer-events-none fixed inset-x-0 top-0 z-20 flex select-none items-center justify-between gap-4 pt-[max(1.25rem,env(safe-area-inset-top))] pr-[max(1.5rem,env(safe-area-inset-right))] pb-5 pl-[max(1.5rem,env(safe-area-inset-left))] font-mono text-[13px] tracking-[0.04em] text-muted"
+    >
       <span className="flex min-w-0 items-center gap-5">
         <a
           href="/"

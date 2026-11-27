@@ -402,12 +402,21 @@ export function AstroDatePicker({
     const handleGlobalPointerDown = (event: globalThis.PointerEvent) => {
       markPointerInput();
       if (
+        event.isPrimary &&
         focusModeRef.current !== "idle" &&
         !cardRef.current?.contains(event.target as Node | null)
       ) {
         touchSessionRef.current = null;
         endActiveDrag();
         setFocusMode("idle");
+        // On iOS Safari, tapping non-interactive background space often leaves the
+        // segment input focused and the virtual keyboard open unless explicitly blurred.
+        if (
+          document.activeElement instanceof HTMLElement &&
+          cardRef.current?.contains(document.activeElement)
+        ) {
+          document.activeElement.blur();
+        }
       }
     };
     const handleGlobalPointerEnd = (event: globalThis.PointerEvent) => {

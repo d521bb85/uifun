@@ -1,6 +1,15 @@
-import { Component, type ErrorInfo, type ReactNode, Suspense, useEffect } from "react";
+import {
+  Component,
+  type ErrorInfo,
+  type ReactNode,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+} from "react";
 import type { ExperimentEntry } from "@/lib/registry";
 import { StageProvider } from "./StageContext";
+import { useStageKeyboardOffset } from "./useStageKeyboardOffset";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -37,6 +46,19 @@ export interface ExperimentStageProps {
 }
 
 export function ExperimentStage({ experiment, mounted, active, stageRef }: ExperimentStageProps) {
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+
+  const setSectionRef = useCallback(
+    (node: HTMLElement | null) => {
+      sectionRef.current = node;
+      stageRef?.(node);
+    },
+    [stageRef],
+  );
+
+  const keyboardOffsetY = useStageKeyboardOffset(sectionRef, contentRef, active, mounted);
+
   useEffect(() => {
     if (mounted) {
       experiment.preload();
@@ -48,13 +70,23 @@ export function ExperimentStage({ experiment, mounted, active, stageRef }: Exper
 
   return (
     <section
-      ref={stageRef}
+      ref={setSectionRef}
       data-slug={experiment.slug}
       data-active={active ? "" : undefined}
-      className="flex h-full w-full shrink-0 snap-start snap-always flex-col items-center justify-center overflow-hidden p-6 [contain:layout_style]"
+      className="relative flex h-full w-full shrink-0 snap-start snap-always flex-col items-center justify-center overflow-hidden p-6 [contain:layout_style]"
     >
       {mounted ? (
-        <div data-stage-content="" className="flex w-full items-center justify-center">
+        <div
+          ref={contentRef}
+          data-stage-content=""
+          data-keyboard-shifted={keyboardOffsetY !== 0 ? "" : undefined}
+          style={
+            keyboardOffsetY !== 0
+              ? { transform: `translate3d(0, ${keyboardOffsetY}px, 0)` }
+              : undefined
+          }
+          className="flex w-full items-center justify-center transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
+        >
           <StageProvider value={{ active, surface: experiment.surface }}>
             <StageErrorBoundary>
               <Suspense fallback={Fallback ? <Fallback /> : null}>
