@@ -50,6 +50,46 @@ describe("SunflowerFader SSR & ui-sdk wiring", () => {
     expect(html).toContain(`bottom:${expectedBottom}`);
   });
 
+  it("renders a clickable numberless left-side 0..100 fader scale aligned to the flower disk center range", () => {
+    const html = renderToString(<SunflowerFader />);
+    const scaleMatch = html.match(/<div[^>]*data-slot="scale"[^>]*>([\s\S]*?)<\/div>/);
+    expect(scaleMatch).not.toBeNull();
+
+    const scaleOpeningTag = html.match(/<div[^>]*data-slot="scale"[^>]*>/)?.[0] ?? "";
+    const scaleInnerHtml = scaleMatch?.[1] ?? "";
+
+    expect(scaleOpeningTag).toContain('aria-hidden="true"');
+    expect(scaleOpeningTag).toContain(`top:${(HEAD_CARD_Y_MAX / CARD_HEIGHT) * 100}%`);
+    expect(scaleOpeningTag).toContain(
+      `bottom:${((CARD_HEIGHT - HEAD_CARD_Y_MIN) / CARD_HEIGHT) * 100}%`,
+    );
+
+    const tickButtons =
+      scaleInnerHtml.match(/<button[^>]*data-tick="[^"]+"[^>]*><span[^>]*><\/span><\/button>/g) ??
+      [];
+    expect(tickButtons).toHaveLength(21);
+
+    const anchorTicks = scaleInnerHtml.match(/data-tick="anchor"/g) ?? [];
+    const majorTicks = scaleInnerHtml.match(/data-tick="major"/g) ?? [];
+    const minorTicks = scaleInnerHtml.match(/data-tick="minor"/g) ?? [];
+    expect(anchorTicks).toHaveLength(3);
+    expect(majorTicks).toHaveLength(8);
+    expect(minorTicks).toHaveLength(10);
+
+    expect(scaleInnerHtml).toContain('tabindex="-1"');
+    expect(scaleInnerHtml).toContain('data-tick="anchor" data-value="0" style="top:100%"');
+    expect(scaleInnerHtml).toContain('data-tick="anchor" data-value="50" style="top:50%"');
+    expect(scaleInnerHtml).toContain('data-tick="anchor" data-value="100" style="top:0%"');
+
+    const scaleText = scaleInnerHtml.replace(/<[^>]+>/g, "").trim();
+    expect(scaleText).toBe("");
+
+    const disabledHtml = renderToString(<SunflowerFader disabled />);
+    const disabledScale =
+      disabledHtml.match(/<div[^>]*data-slot="scale"[^>]*>([\s\S]*?)<\/div>/)?.[1] ?? "";
+    expect(disabledScale).toContain("disabled");
+  });
+
   it("supports controlled value, custom label, form attributes, disabled, and readOnly", () => {
     const html = renderToString(
       <SunflowerFader

@@ -12,6 +12,7 @@ import {
 } from "@ui-sdk/react/slider";
 import {
   type CSSProperties,
+  type MouseEvent,
   type PointerEvent,
   useCallback,
   useEffect,
@@ -74,6 +75,22 @@ const SLIDER_TRACK_BOUNDS_STYLE: CSSProperties = {
   top: `${(HEAD_CARD_Y_MAX / CARD_HEIGHT) * 100}%`,
   bottom: `${((CARD_HEIGHT - HEAD_CARD_Y_MIN) / CARD_HEIGHT) * 100}%`,
 };
+
+type ScaleTickTier = "anchor" | "major" | "minor";
+
+const SCALE_TICKS: readonly { value: number; tier: ScaleTickTier }[] = Array.from(
+  { length: 21 },
+  (_, index) => {
+    const value = index * 5;
+    const tier: ScaleTickTier =
+      value === 0 || value === 50 || value === 100
+        ? "anchor"
+        : value % 10 === 0
+          ? "major"
+          : "minor";
+    return { value, tier };
+  },
+);
 
 export function SunflowerFader({
   value,
@@ -323,6 +340,16 @@ export function SunflowerFader({
     }
   }, []);
 
+  const handleScaleTickClick = useCallback(
+    (tickValue: number, event: MouseEvent<HTMLButtonElement>) => {
+      if (disabled || readOnly) return;
+      lastModalityRef.current = "pointer";
+      setKeyboardFocus(false);
+      controller.setValue(tickValue, { event: event.nativeEvent });
+    },
+    [controller, disabled, readOnly],
+  );
+
   const initialHeadDx = `${(getHeadNormalizedCardPos(simRef.current.head).xPct - 50).toFixed(2)}%`;
 
   return (
@@ -357,6 +384,44 @@ export function SunflowerFader({
           ["--sunflower-head-dx" as string]: initialHeadDx,
         }}
       >
+        <div
+          aria-hidden="true"
+          data-slot="scale"
+          className={cn("absolute right-[calc(100%+16px)] w-6", disabled && "opacity-45")}
+          style={SLIDER_TRACK_BOUNDS_STYLE}
+        >
+          {SCALE_TICKS.map((tick) => (
+            <button
+              key={tick.value}
+              type="button"
+              tabIndex={-1}
+              disabled={disabled}
+              data-tick={tick.tier}
+              data-value={tick.value}
+              style={{ top: `${100 - tick.value}%` }}
+              onPointerDown={(event) => {
+                event.preventDefault();
+              }}
+              onClick={(event) => handleScaleTickClick(tick.value, event)}
+              className={cn(
+                "group/tick absolute right-0 flex h-[5%] w-full -translate-y-1/2 items-center justify-end border-0 bg-transparent p-0 pr-1 outline-none",
+                disabled ? "cursor-not-allowed" : readOnly ? "cursor-default" : "cursor-pointer",
+              )}
+            >
+              <span
+                className={cn(
+                  "block h-px origin-right rounded-full transition-[background-color,transform] duration-150 ease-out",
+                  tick.tier === "anchor" && "w-3 bg-fg/42",
+                  tick.tier === "major" && "w-2 bg-fg/28",
+                  tick.tier === "minor" && "w-[5px] bg-fg/18",
+                  !disabled &&
+                    !readOnly &&
+                    "group-hover/tick:scale-x-[1.2] group-hover/tick:bg-fg/80 group-active/tick:bg-fg",
+                )}
+              />
+            </button>
+          ))}
+        </div>
         <canvas
           ref={canvasRef}
           width={CANVAS_WIDTH}
