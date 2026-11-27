@@ -47,7 +47,7 @@ export default defineExperiment({
 });
 ```
 
-Experiments are automatically discovered, sorted newest-first, code-split, and accessible by direct link at `/e/<slug>`. The root path `/` currently redirects to [ivanen.co](https://ivanen.co).
+Experiments are automatically discovered, sorted newest-first, code-split, and accessible from the index at `/` or by direct link at `/e/<slug>`.
 
 ## Releasing
 

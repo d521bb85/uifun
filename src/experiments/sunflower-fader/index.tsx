@@ -1,4 +1,5 @@
 import { defineExperiment } from "@/lib/define-experiment";
+import { SunflowerFaderSkeleton } from "./SunflowerFaderSkeleton";
 
 export default defineExperiment({
   title: "Sunflower Fader",
@@ -7,4 +8,5 @@ export default defineExperiment({
   description:
     "A vertical watercolor-pencil sunflower fader that blooms from wilted shepherd's crook to radiant summer height.",
   load: () => import("./SunflowerFaderDemo"),
+  fallback: SunflowerFaderSkeleton,
 });

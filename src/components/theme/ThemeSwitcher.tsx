@@ -16,7 +16,7 @@ export function ThemeSwitcher() {
           event: event.nativeEvent,
         });
       }}
-      className="fixed right-6 bottom-5 z-20 h-auto select-none border-0 bg-transparent p-0 font-mono text-[13px] font-normal tracking-[0.04em] text-muted hover:bg-transparent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-fg"
+      className="fixed right-[max(1.5rem,env(safe-area-inset-right))] bottom-[max(1.25rem,env(safe-area-inset-bottom))] z-20 h-auto select-none border-0 bg-transparent p-0 font-mono text-[13px] font-normal tracking-[0.04em] text-muted hover:bg-transparent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-fg"
     >
       {value}
     </Button>

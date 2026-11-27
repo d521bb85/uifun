@@ -3,42 +3,115 @@ import {
   createRoute,
   createRouter,
   Outlet,
+  useNavigate,
   useRouterState,
 } from "@tanstack/react-router";
 import { Preferences } from "@ui-sdk/react/preferences";
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FeedHeader } from "@/components/feed/FeedHeader";
-import { ExperimentStage } from "@/components/stage/ExperimentStage";
+import { FeedList, type FeedScrollToIndex } from "@/components/feed/FeedList";
+import { FeedNav } from "@/components/feed/FeedNav";
 import { ThemeSwitcher } from "@/components/theme/ThemeSwitcher";
-import { getExperimentBySlug } from "@/lib/registry";
+import { experiments, getExperimentBySlug } from "@/lib/registry";
 import { colorScheme } from "@/lib/theme";
 
-const HOME_REDIRECT_URL = "https://ivanen.co";
+function indexFromPathname(pathname: string): number | null {
+  if (pathname === "/") return 0;
+  const match = pathname.match(/^\/e\/([^/]+)\/?$/);
+  if (!match?.[1]) return null;
+  const idx = experiments.findIndex((item) => item.slug === match[1]);
+  return idx === -1 ? null : idx + 1;
+}
+
+function pathForIndex(index: number): string {
+  if (index <= 0) return "/";
+  const item = experiments[index - 1];
+  return item ? `/e/${item.slug}` : "/";
+}
+
+function NotFoundView() {
+  return (
+    <section className="flex h-dvh w-full items-center justify-center p-6">
+      <p className="font-mono text-xs text-muted">404</p>
+    </section>
+  );
+}
+
+function FeedShell({ initialIndex }: { initialIndex: number }) {
+  const [activeIndex, setActiveIndex] = useState(initialIndex);
+  const scrollToRef = useRef<FeedScrollToIndex | null>(null);
+
+  const alias = activeIndex > 0 ? experiments[activeIndex - 1]?.slug : undefined;
+
+  useEffect(() => {
+    document.title = alias ? `${alias} – ivanen.co` : "ui – ivanen.co";
+  }, [alias]);
+
+  const handleActiveChange = useCallback((index: number, options: { push: boolean }) => {
+    setActiveIndex(index);
+    const nextPath = pathForIndex(index);
+    if (window.location.pathname !== nextPath) {
+      if (options.push) {
+        window.history.pushState(null, "", nextPath);
+      } else {
+        window.history.replaceState(window.history.state, "", nextPath);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const targetIndex = indexFromPathname(window.location.pathname);
+      if (targetIndex !== null) {
+        scrollToRef.current?.(targetIndex, { push: false });
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  const handleSelect = useCallback((index: number) => {
+    scrollToRef.current?.(index, { push: true });
+  }, []);
+
+  return (
+    <>
+      <FeedHeader alias={alias} onHomeClick={() => handleSelect(0)} />
+      <FeedList
+        items={experiments}
+        initialIndex={initialIndex}
+        onActiveChange={handleActiveChange}
+        scrollToRef={scrollToRef}
+      />
+      <FeedNav items={experiments} activeIndex={activeIndex} onSelect={handleSelect} />
+    </>
+  );
+}
 
 function RootLayout() {
-  const { isHome, alias } = useRouterState({
-    select: (state) => {
-      const isHomeRoute = state.location.pathname === "/";
-      const match = state.matches.find((m) => "slug" in (m.params as Record<string, unknown>));
-      const rawSlug = (match?.params as { slug?: string } | undefined)?.slug;
-      const experiment = rawSlug ? getExperimentBySlug(rawSlug) : undefined;
-      return {
-        isHome: isHomeRoute,
-        alias: experiment?.slug,
-      };
-    },
+  const navigate = useNavigate();
+  const initialIndex = useRouterState({
+    select: (state) => indexFromPathname(state.location.pathname),
   });
 
   useEffect(() => {
-    document.title = alias ? `${alias} — ui` : "ui — ivanen.co";
-  }, [alias]);
+    if (initialIndex === null) {
+      document.title = "404 – ivanen.co";
+    }
+  }, [initialIndex]);
 
   return (
     <Preferences preferences={[colorScheme]}>
-      <div className="min-h-dvh w-full bg-canvas text-foreground">
-        {!isHome && <FeedHeader alias={alias} />}
-        <Outlet />
-        {!isHome && <ThemeSwitcher />}
+      <div className="fixed inset-0 bg-canvas text-foreground">
+        {initialIndex !== null ? (
+          <FeedShell initialIndex={initialIndex} />
+        ) : (
+          <>
+            <FeedHeader onHomeClick={() => void navigate({ to: "/" })} />
+            <Outlet />
+          </>
+        )}
+        <ThemeSwitcher />
       </div>
     </Preferences>
   );
@@ -48,47 +121,18 @@ const rootRoute = createRootRoute({
   component: RootLayout,
 });
 
-function HomeRedirectPage() {
-  useEffect(() => {
-    window.location.replace(HOME_REDIRECT_URL);
-  }, []);
-
-  return null;
-}
-
 const homeRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: HomeRedirectPage,
+  component: () => null,
 });
-
-function NotFoundView() {
-  return (
-    <section className="flex min-h-dvh w-full items-center justify-center p-6">
-      <p className="font-mono text-xs text-muted">404</p>
-    </section>
-  );
-}
-
-function renderExperiment(slug: string) {
-  const experiment = getExperimentBySlug(slug);
-
-  return (
-    <main className="w-full">
-      {experiment ? <ExperimentStage experiment={experiment} standalone /> : <NotFoundView />}
-    </main>
-  );
-}
 
 const experimentRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/e/$slug",
-  loader: ({ params }) => {
-    getExperimentBySlug(params.slug)?.preload();
-  },
   component: function ExperimentRoutePage() {
     const { slug } = experimentRoute.useParams();
-    return renderExperiment(slug);
+    return getExperimentBySlug(slug) ? null : <NotFoundView />;
   },
 });
 
@@ -96,7 +140,7 @@ const routeTree = rootRoute.addChildren([homeRoute, experimentRoute]);
 
 export const router = createRouter({
   routeTree,
-  defaultPreload: "intent",
+  defaultPreload: false,
   defaultNotFoundComponent: NotFoundView,
 });
 
