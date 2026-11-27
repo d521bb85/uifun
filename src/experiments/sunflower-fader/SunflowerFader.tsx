@@ -1,0 +1,422 @@
+"use client";
+
+import {
+  createSliderController,
+  Slider,
+  SliderControl,
+  SliderThumb,
+  SliderTrack,
+  SliderValue,
+  type SliderValueChangeDetails,
+  type SliderValueCommitDetails,
+} from "@ui-sdk/react/slider";
+import {
+  type CSSProperties,
+  type PointerEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import { useStageActive } from "@/components/stage/StageContext";
+import { cn } from "@/lib/cn";
+import {
+  createInitialSimState,
+  getHeadNormalizedCardPos,
+  isPointOnHead,
+  stepSimState,
+} from "./botanyPhysics";
+import { clamp } from "./colorAndCurves";
+import { renderSunflowerFrame } from "./renderFrame";
+import {
+  BLEED_X,
+  BLEED_Y,
+  CANVAS_HEIGHT,
+  CANVAS_WIDTH,
+  CARD_HEIGHT,
+  CARD_WIDTH,
+  HEAD_CARD_Y_MAX,
+  HEAD_CARD_Y_MIN,
+  type Point2D,
+  type SunflowerSimState,
+} from "./types";
+
+export interface SunflowerFaderProps {
+  value?: number;
+  defaultValue?: number;
+  onValueChange?: (value: number, details: SliderValueChangeDetails) => void;
+  onValueCommit?: (value: number, details: SliderValueCommitDetails) => void;
+  label?: string;
+  name?: string;
+  form?: string;
+  disabled?: boolean;
+  readOnly?: boolean;
+  className?: string;
+}
+
+const formatPercent = (v: number) => `${Math.round(v)}%`;
+
+const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta"]);
+
+const CARD_FRAME_STYLE: CSSProperties = {
+  width: `min(${CARD_WIDTH}px, calc((100dvh - 132px) * ${CARD_WIDTH / CARD_HEIGHT}), calc(100vw - 104px))`,
+  aspectRatio: `${CARD_WIDTH} / ${CARD_HEIGHT}`,
+};
+
+const CANVAS_BLEED_STYLE: CSSProperties = {
+  left: `${(-BLEED_X / CARD_WIDTH) * 100}%`,
+  top: `${(-BLEED_Y / CARD_HEIGHT) * 100}%`,
+  width: `${(CANVAS_WIDTH / CARD_WIDTH) * 100}%`,
+  height: `${(CANVAS_HEIGHT / CARD_HEIGHT) * 100}%`,
+};
+
+const SLIDER_TRACK_BOUNDS_STYLE: CSSProperties = {
+  top: `${(HEAD_CARD_Y_MAX / CARD_HEIGHT) * 100}%`,
+  bottom: `${((CARD_HEIGHT - HEAD_CARD_Y_MIN) / CARD_HEIGHT) * 100}%`,
+};
+
+export function SunflowerFader({
+  value,
+  defaultValue = 68,
+  onValueChange,
+  onValueCommit,
+  label = "Sunflower bloom",
+  name,
+  form,
+  disabled,
+  readOnly,
+  className,
+}: SunflowerFaderProps) {
+  const isControlled = value !== undefined;
+  const initialValue = clamp(isControlled ? value : defaultValue, 0, 100);
+
+  const [controller] = useState(() => createSliderController<number>());
+  const [uncontrolledValue, setUncontrolledValue] = useState(initialValue);
+  const [hoveringHead, setHoveringHead] = useState(false);
+  const [keyboardFocus, setKeyboardFocus] = useState(false);
+
+  const activeValue = clamp(isControlled ? value : uncontrolledValue, 0, 100);
+  const stageActive = useStageActive();
+
+  const frameRef = useRef<HTMLDivElement | null>(null);
+  const controlRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  const simRef = useRef<SunflowerSimState | null>(null);
+  if (!simRef.current) {
+    simRef.current = createInitialSimState(initialValue);
+  }
+
+  const targetValueRef = useRef(activeValue);
+  targetValueRef.current = activeValue;
+
+  const stageActiveRef = useRef(stageActive);
+  stageActiveRef.current = stageActive;
+
+  const pointerCanvasRef = useRef<Point2D | null>(null);
+  const hoverHeadRef = useRef(false);
+  const reducedMotionRef = useRef(false);
+  const wheelAccumRef = useRef(0);
+  const lastModalityRef = useRef<"keyboard" | "pointer">("pointer");
+
+  const syncHeadOffset = useCallback((sim: SunflowerSimState) => {
+    const frameEl = frameRef.current;
+    if (!frameEl) return;
+    const { xPct } = getHeadNormalizedCardPos(sim.head);
+    frameEl.style.setProperty("--sunflower-head-dx", `${(xPct - 50).toFixed(2)}%`);
+  }, []);
+
+  const paintCanvas = useCallback(
+    (sim: SunflowerSimState) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const targetW = Math.round(CANVAS_WIDTH * dpr);
+      const targetH = Math.round(CANVAS_HEIGHT * dpr);
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW;
+        canvas.height = targetH;
+      }
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      renderSunflowerFrame(ctx, sim, dpr);
+      syncHeadOffset(sim);
+    },
+    [syncHeadOffset],
+  );
+
+  const paintSettledValue = useCallback(
+    (nextValue: number) => {
+      const sim = simRef.current;
+      if (!sim) return;
+      sim.targetValue = nextValue;
+      sim.displayValue = nextValue;
+      sim.valueVelocity = 0;
+      stepSimState(sim, 0, {
+        targetValue: nextValue,
+        dragging: false,
+        hoverHead: hoverHeadRef.current,
+        pointerCanvas: pointerCanvasRef.current,
+        reducedMotion: true,
+      });
+      paintCanvas(sim);
+    },
+    [paintCanvas],
+  );
+
+  useEffect(() => {
+    const onWindowKeyDown = (event: KeyboardEvent) => {
+      if (MODIFIER_KEYS.has(event.key)) return;
+      lastModalityRef.current = "keyboard";
+    };
+    const onWindowPointerDown = () => {
+      lastModalityRef.current = "pointer";
+    };
+    const onWindowPointerMove = (event: globalThis.PointerEvent) => {
+      if (!controlRef.current?.hasAttribute("data-dragging")) return;
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      pointerCanvasRef.current = {
+        x: ((event.clientX - rect.left) / rect.width) * CANVAS_WIDTH,
+        y: ((event.clientY - rect.top) / rect.height) * CANVAS_HEIGHT,
+      };
+    };
+    window.addEventListener("keydown", onWindowKeyDown, true);
+    window.addEventListener("pointerdown", onWindowPointerDown, true);
+    window.addEventListener("pointermove", onWindowPointerMove, true);
+    return () => {
+      window.removeEventListener("keydown", onWindowKeyDown, true);
+      window.removeEventListener("pointerdown", onWindowPointerDown, true);
+      window.removeEventListener("pointermove", onWindowPointerMove, true);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    reducedMotionRef.current = mq.matches;
+    const onChange = (event: MediaQueryListEvent) => {
+      reducedMotionRef.current = event.matches;
+    };
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+
+  useEffect(() => {
+    const sim = simRef.current;
+    if (!sim) return;
+
+    if (!stageActive) {
+      paintSettledValue(targetValueRef.current);
+      return;
+    }
+
+    paintCanvas(sim);
+
+    let rafId = 0;
+    let lastTime = performance.now();
+
+    const tick = (now: number) => {
+      const dt = Math.min(Math.max((now - lastTime) / 1000, 0), 0.05);
+      lastTime = now;
+      const dragging = controlRef.current?.hasAttribute("data-dragging") ?? false;
+
+      stepSimState(sim, dt, {
+        targetValue: targetValueRef.current,
+        dragging,
+        hoverHead: hoverHeadRef.current,
+        pointerCanvas: pointerCanvasRef.current,
+        reducedMotion: reducedMotionRef.current,
+      });
+      paintCanvas(sim);
+
+      rafId = window.requestAnimationFrame(tick);
+    };
+
+    rafId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(rafId);
+  }, [stageActive, paintCanvas, paintSettledValue]);
+
+  useEffect(() => {
+    if (!stageActive) {
+      paintSettledValue(activeValue);
+    }
+  }, [activeValue, stageActive, paintSettledValue]);
+
+  // Native non-passive wheel listener so preventDefault stops page scroll only over the card.
+  useEffect(() => {
+    const frameEl = frameRef.current;
+    if (!frameEl) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (disabled || readOnly) return;
+      if (Math.abs(event.deltaY) < 0.01) return;
+      event.preventDefault();
+
+      const raw = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
+      wheelAccumRef.current += -raw * 0.03;
+
+      const wholeSteps = Math.trunc(wheelAccumRef.current);
+      if (wholeSteps === 0) return;
+      wheelAccumRef.current -= wholeSteps;
+
+      const current = controller.getValue();
+      const next = clamp(current + wholeSteps, 0, 100);
+      if (next === current) {
+        wheelAccumRef.current = 0;
+        return;
+      }
+      controller.setValue(next, { event });
+    };
+
+    frameEl.addEventListener("wheel", handleWheel, { passive: false });
+    return () => frameEl.removeEventListener("wheel", handleWheel);
+  }, [controller, disabled, readOnly]);
+
+  const handleValueChange = useCallback(
+    (next: number, details: SliderValueChangeDetails) => {
+      onValueChange?.(next, details);
+      if (details.canceled) {
+        return;
+      }
+      if (!isControlled) {
+        setUncontrolledValue(next);
+      }
+      targetValueRef.current = next;
+      if (!stageActiveRef.current) {
+        paintSettledValue(next);
+      }
+    },
+    [isControlled, onValueChange, paintSettledValue],
+  );
+
+  const handlePointerMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const canvas = canvasRef.current;
+    const sim = simRef.current;
+    if (!canvas || !sim) return;
+
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    const canvasX = ((event.clientX - rect.left) / rect.width) * CANVAS_WIDTH;
+    const canvasY = ((event.clientY - rect.top) / rect.height) * CANVAS_HEIGHT;
+    pointerCanvasRef.current = { x: canvasX, y: canvasY };
+
+    const onHead = isPointOnHead(canvasX, canvasY, sim.head, 10);
+    if (onHead !== hoverHeadRef.current) {
+      hoverHeadRef.current = onHead;
+      setHoveringHead(onHead);
+    }
+  }, []);
+
+  const handlePointerLeave = useCallback(() => {
+    if (!controlRef.current?.hasAttribute("data-dragging")) {
+      pointerCanvasRef.current = null;
+    }
+    if (hoverHeadRef.current) {
+      hoverHeadRef.current = false;
+      setHoveringHead(false);
+    }
+  }, []);
+
+  const initialHeadDx = `${(getHeadNormalizedCardPos(simRef.current.head).xPct - 50).toFixed(2)}%`;
+
+  return (
+    <Slider<number>
+      orientation="vertical"
+      min={0}
+      max={100}
+      step={1}
+      largeStep={10}
+      value={isControlled ? activeValue : undefined}
+      defaultValue={isControlled ? undefined : initialValue}
+      onValueChange={handleValueChange}
+      onValueCommit={onValueCommit}
+      controller={controller}
+      format={formatPercent}
+      name={name}
+      form={form}
+      disabled={disabled}
+      readOnly={readOnly}
+      className={cn(
+        "inline-flex w-auto min-w-0 flex-col items-center gap-4 select-none",
+        className,
+      )}
+    >
+      <div
+        ref={frameRef}
+        onPointerMove={handlePointerMove}
+        onPointerLeave={handlePointerLeave}
+        className="relative"
+        style={{
+          ...CARD_FRAME_STYLE,
+          ["--sunflower-head-dx" as string]: initialHeadDx,
+        }}
+      >
+        <canvas
+          ref={canvasRef}
+          width={CANVAS_WIDTH}
+          height={CANVAS_HEIGHT}
+          className="pointer-events-none absolute block max-w-none"
+          style={CANVAS_BLEED_STYLE}
+        />
+        {/* Track keyboard vs pointer modality because Chrome matches :focus-visible on programmatic range input focus during drag. */}
+        <SliderControl
+          ref={controlRef}
+          data-focus-keyboard={keyboardFocus ? "" : undefined}
+          onPointerDown={(event) => {
+            lastModalityRef.current = "pointer";
+            setKeyboardFocus(false);
+            const canvas = canvasRef.current;
+            if (!canvas) return;
+            const rect = canvas.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return;
+            pointerCanvasRef.current = {
+              x: ((event.clientX - rect.left) / rect.width) * CANVAS_WIDTH,
+              y: ((event.clientY - rect.top) / rect.height) * CANVAS_HEIGHT,
+            };
+          }}
+          onFocus={() => {
+            setKeyboardFocus(lastModalityRef.current === "keyboard");
+          }}
+          onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget)) {
+              setKeyboardFocus(false);
+            }
+          }}
+          onKeyDown={(event) => {
+            if (!MODIFIER_KEYS.has(event.key)) {
+              lastModalityRef.current = "keyboard";
+              setKeyboardFocus(true);
+            }
+          }}
+          className={cn(
+            "absolute inset-0 block h-full w-full rounded-[18px] p-0 touch-none",
+            "data-[focus-keyboard]:outline-2 data-[focus-keyboard]:outline-offset-4 data-[focus-keyboard]:outline-muted",
+            "data-dragging:cursor-grabbing data-disabled:cursor-not-allowed",
+            hoveringHead ? "cursor-grab" : "cursor-pointer",
+          )}
+        >
+          <div className="absolute inset-x-0" style={SLIDER_TRACK_BOUNDS_STYLE}>
+            <SliderTrack className="h-full w-full rounded-none bg-transparent">
+              <SliderThumb
+                aria-label={label}
+                className={cn(
+                  "ml-[var(--sunflower-head-dx,0%)] size-[78px] rounded-full border-0 bg-transparent [cursor:inherit]",
+                  "data-dragging:cursor-grabbing data-disabled:cursor-not-allowed",
+                  "has-[:focus-visible]:outline-none",
+                )}
+              />
+            </SliderTrack>
+          </div>
+        </SliderControl>
+      </div>
+
+      <SliderValue className="font-mono text-[13px] font-normal tracking-[0.04em] tabular-nums text-muted select-none" />
+    </Slider>
+  );
+}
