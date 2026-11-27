@@ -1533,11 +1533,12 @@ function projY(p: HeadProjection, x: number, y: number, z: number): number {
 function drawCalyxCup(
   ctx: CanvasRenderingContext2D,
   head: HeadPose,
+  stem: readonly StemNode[],
   proj: HeadProjection,
   palette: SunflowerPalette,
 ): void {
   const alpha = -head.pitch;
-  const cupVisibility = smoothstep(0.16, 0.68, alpha);
+  const cupVisibility = smoothstep(0.06, 0.28, alpha);
   if (cupVisibility <= 0.01) return;
 
   const r = head.diskRadius * 1.06;
@@ -1553,26 +1554,71 @@ function drawCalyxCup(
   const frontRimX = projX(proj, 0, -r * 0.94, rimZ + 0.5);
   const frontRimY = projY(proj, 0, -r * 0.94, rimZ + 0.5);
 
+  // Overlap the calyx collar 1.5px back along the stem tip so the stalk flares seamlessly with zero gap or protrusion
+  const n = stem.length;
+  const tipNode = n >= 1 ? stem[n - 1] : undefined;
+
+  const rawTx = tipNode ? tipNode.tx : 0;
+  const rawTy = tipNode ? tipNode.ty : 1;
+  const tLen = Math.hypot(rawTx, rawTy) || 1;
+  const tx = rawTx / tLen;
+  const ty = rawTy / tLen;
+  const nx = -ty;
+  const ny = tx;
+  const collarR = tipNode ? tipNode.radius : 2.2;
+  const collarX = (tipNode ? tipNode.x : neckPt.x) - tx * 1.5;
+  const collarY = (tipNode ? tipNode.y : neckPt.y) - ty * 1.5;
+
+  // Exact left/right edges of the stem at the collar (matching drawStem's leftPts / rightPts)
+  const edgeAx = collarX - nx * collarR;
+  const edgeAy = collarY - ny * collarR;
+  const edgeBx = collarX + nx * collarR;
+  const edgeBy = collarY + ny * collarR;
+
+  // Minimum-distance pairing guarantees non-crossing connection across all 360deg stem angles
+  const pairAB =
+    Math.hypot(edgeAx - leftRimX, edgeAy - leftRimY) +
+    Math.hypot(edgeBx - rightRimX, edgeBy - rightRimY);
+  const pairBA =
+    Math.hypot(edgeBx - leftRimX, edgeBy - leftRimY) +
+    Math.hypot(edgeAx - rightRimX, edgeAy - rightRimY);
+
+  const aIsLeft = pairAB <= pairBA;
+  const collarLx = aIsLeft ? edgeAx : edgeBx;
+  const collarLy = aIsLeft ? edgeAy : edgeBy;
+  const collarRx = aIsLeft ? edgeBx : edgeAx;
+  const collarRy = aIsLeft ? edgeBy : edgeAy;
+
+  const distL = Math.hypot(leftRimX - collarLx, leftRimY - collarLy) || 1;
+  const distR = Math.hypot(rightRimX - collarRx, rightRimY - collarRy) || 1;
+  const alignL = clamp01(((leftRimX - collarLx) * tx + (leftRimY - collarLy) * ty) / distL);
+  const alignR = clamp01(((rightRimX - collarRx) * tx + (rightRimY - collarRy) * ty) / distR);
+  const handleL = Math.min(10, Math.max(3, distL * lerp(0.15, 0.26, alignL)));
+  const handleR = Math.min(10, Math.max(3, distR * lerp(0.15, 0.26, alignR)));
+
+  // C1-continuous cubic Bézier curves leaving the stem edges strictly along the stem tangent (tx, ty)
+  const cp1Lx = collarLx + tx * handleL;
+  const cp1Ly = collarLy + ty * handleL;
+  const cp2Lx = lerp(leftRimX, backApexX, 0.48);
+  const cp2Ly = lerp(leftRimY, backApexY, 0.72);
+
+  const cp1Rx = collarRx + tx * handleR;
+  const cp1Ry = collarRy + ty * handleR;
+  const cp2Rx = lerp(rightRimX, backApexX, 0.48);
+  const cp2Ry = lerp(rightRimY, backApexY, 0.72);
+
   const cupPath = new Path2D();
-  cupPath.moveTo(leftRimX, leftRimY);
-  cupPath.quadraticCurveTo(
-    lerp(leftRimX, neckPt.x, 0.54),
-    lerp(leftRimY, backApexY, 0.78),
-    neckPt.x,
-    neckPt.y,
-  );
-  cupPath.quadraticCurveTo(
-    lerp(rightRimX, neckPt.x, 0.54),
-    lerp(rightRimY, backApexY, 0.78),
-    rightRimX,
-    rightRimY,
-  );
-  cupPath.quadraticCurveTo(frontRimX, frontRimY + 1.5, leftRimX, leftRimY);
+  cupPath.moveTo(collarLx, collarLy);
+  cupPath.bezierCurveTo(cp1Lx, cp1Ly, cp2Lx, cp2Ly, leftRimX, leftRimY);
+  cupPath.quadraticCurveTo(frontRimX, frontRimY + 1.5, rightRimX, rightRimY);
+  cupPath.bezierCurveTo(cp2Rx, cp2Ry, cp1Rx, cp1Ry, collarRx, collarRy);
   cupPath.closePath();
 
-  const cupGrad = ctx.createLinearGradient(neckPt.x, neckPt.y, frontRimX, frontRimY + 6);
-  cupGrad.addColorStop(0, rgbToCss(lerpRgb(palette.stemBase, palette.sepalFill, 0.45)));
-  cupGrad.addColorStop(0.55, rgbToCss(palette.sepalFill));
+  // Gradient starts at the exact stem-tip fill tone so the stem merges seamlessly into the calyx
+  const cupGrad = ctx.createLinearGradient(collarX, collarY, frontRimX, frontRimY + 6);
+  cupGrad.addColorStop(0, rgbToCss(lerpRgb(palette.stemBase, palette.stemHighlight, 0.2)));
+  cupGrad.addColorStop(0.28, rgbToCss(lerpRgb(palette.stemBase, palette.sepalFill, 0.48)));
+  cupGrad.addColorStop(0.64, rgbToCss(palette.sepalFill));
   cupGrad.addColorStop(1, rgbToCss(lerpRgb(palette.sepalFill, palette.outlineInk, 0.3)));
 
   ctx.save();
@@ -1583,37 +1629,89 @@ function drawCalyxCup(
   ctx.save();
   ctx.clip(cupPath);
 
-  ctx.strokeStyle = rgbToCss(palette.outlineInk, 0.22);
-  ctx.lineWidth = 0.58;
+  // Continue the same colored-pencil grain texture unbroken from stem into calyx
+  const hatchPat = getHatchOverlayPattern(ctx);
+  if (hatchPat) {
+    const minX = Math.min(leftRimX, rightRimX, collarLx, collarRx) - 2;
+    const maxX = Math.max(leftRimX, rightRimX, collarLx, collarRx) + 2;
+    const minY = Math.min(leftRimY, rightRimY, collarLy, collarRy, backApexY) - 2;
+    const maxY = Math.max(leftRimY, rightRimY, frontRimY + 4) + 2;
+    ctx.save();
+    ctx.globalAlpha = 0.22;
+    ctx.fillStyle = hatchPat;
+    ctx.fillRect(minX, minY, maxX - minX, maxY - minY);
+    ctx.restore();
+  }
+
+  // Soft sunlit ridge continuing unbroken from stem's highlight flank onto the calyx shoulder
+  const hiStartX = collarX - nx * collarR * 0.44;
+  const hiStartY = collarY - ny * collarR * 0.44;
+  const hiRimX = aIsLeft ? leftRimX + 4 : rightRimX - 4;
+  const hiRimY = aIsLeft ? leftRimY : rightRimY;
+  const hiCp1X = hiStartX + tx * (aIsLeft ? handleL : handleR) * 0.9;
+  const hiCp1Y = hiStartY + ty * (aIsLeft ? handleL : handleR) * 0.9;
+  const hiCp2X = lerp(hiRimX, backApexX, 0.54);
+  const hiCp2Y = lerp(hiRimY, backApexY, 0.72);
+
+  ctx.lineCap = "round";
+  ctx.strokeStyle = rgbToCss(lerpRgb(palette.stemHighlight, palette.paperBg, 0.2), 0.46);
+  ctx.lineWidth = 2.2;
+  ctx.beginPath();
+  ctx.moveTo(hiStartX, hiStartY);
+  ctx.bezierCurveTo(hiCp1X, hiCp1Y, hiCp2X, hiCp2Y, hiRimX, hiRimY);
+  ctx.stroke();
+
+  // Matching shaded flank continuing unbroken from stem's shadow side onto the opposite shoulder
+  const shStartX = collarX + nx * collarR * 0.54;
+  const shStartY = collarY + ny * collarR * 0.54;
+  const shRimX = aIsLeft ? rightRimX - 3 : leftRimX + 3;
+  const shRimY = aIsLeft ? rightRimY : leftRimY;
+  const shCp1X = shStartX + tx * (aIsLeft ? handleR : handleL) * 0.9;
+  const shCp1Y = shStartY + ty * (aIsLeft ? handleR : handleL) * 0.9;
+  const shCp2X = lerp(shRimX, backApexX, 0.54);
+  const shCp2Y = lerp(shRimY, backApexY, 0.72);
+
+  ctx.strokeStyle = rgbToCss(lerpRgb(palette.stemBase, palette.stemOutline, 0.44), 0.36);
+  ctx.lineWidth = 2.0;
+  ctx.beginPath();
+  ctx.moveTo(shStartX, shStartY);
+  ctx.bezierCurveTo(shCp1X, shCp1Y, shCp2X, shCp2Y, shRimX, shRimY);
+  ctx.stroke();
+
+  // Delicate radiating calyx ribs fading softly in below the neck flare
+  const ribStartX = lerp(collarX, backApexX, 0.55);
+  const ribStartY = lerp(collarY, backApexY, 0.55);
+  ctx.strokeStyle = rgbToCss(palette.outlineInk, 0.2);
+  ctx.lineWidth = 0.56;
   ctx.beginPath();
   for (let i = -4; i <= 4; i++) {
     const ox = i * 4.4;
-    ctx.moveTo(neckPt.x + ox * 0.22, neckPt.y);
+    ctx.moveTo(ribStartX + ox * 0.34, ribStartY + 1);
     ctx.quadraticCurveTo(
-      backApexX + ox * 0.68,
-      (neckPt.y + frontRimY) * 0.5,
+      backApexX + ox * 0.72,
+      (ribStartY + frontRimY) * 0.52,
       frontRimX + ox * 1.1,
       frontRimY + 4,
     );
   }
   ctx.stroke();
-
-  ctx.strokeStyle = rgbToCss(palette.stemHighlight, 0.34);
-  ctx.lineWidth = 2.2;
-  ctx.beginPath();
-  ctx.moveTo(neckPt.x - 1.5, neckPt.y + 1);
-  ctx.quadraticCurveTo(
-    lerp(leftRimX, neckPt.x, 0.45),
-    (neckPt.y + leftRimY) * 0.52,
-    leftRimX + 4,
-    leftRimY,
-  );
-  ctx.stroke();
   ctx.restore();
 
-  ctx.strokeStyle = rgbToCss(palette.outlineInk, 0.36);
-  ctx.lineWidth = 0.65;
-  ctx.stroke(cupPath);
+  // Stroke ONLY the two continuous flared outer edges (never across the stem collar!)
+  ctx.lineCap = "round";
+  ctx.strokeStyle = rgbToCss(palette.stemOutline, aIsLeft ? 0.3 : 0.42);
+  ctx.lineWidth = aIsLeft ? 0.62 : 0.7;
+  ctx.beginPath();
+  ctx.moveTo(collarLx, collarLy);
+  ctx.bezierCurveTo(cp1Lx, cp1Ly, cp2Lx, cp2Ly, leftRimX, leftRimY);
+  ctx.stroke();
+
+  ctx.strokeStyle = rgbToCss(palette.stemOutline, aIsLeft ? 0.42 : 0.3);
+  ctx.lineWidth = aIsLeft ? 0.7 : 0.62;
+  ctx.beginPath();
+  ctx.moveTo(collarRx, collarRy);
+  ctx.bezierCurveTo(cp1Rx, cp1Ry, cp2Rx, cp2Ry, rightRimX, rightRimY);
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -1990,7 +2088,7 @@ function drawSunflowerHead(
   const petalT = clamp01(phases.warmth * 0.22 + phases.bloom * 0.78);
   const diskT = clamp01(phases.headLift * 0.36 + phases.bloom * 0.64);
 
-  drawCalyxCup(ctx, head, proj, palette);
+  drawCalyxCup(ctx, head, state.stem, proj, palette);
   drawCradleBracts(ctx, head, proj, palette);
   drawBatchedSepals(ctx, head, proj, palette);
 
