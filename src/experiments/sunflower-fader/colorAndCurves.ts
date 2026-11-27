@@ -1,7 +1,7 @@
 import type { PhasedProgress, RGB, SunflowerPalette } from "./types";
 
 export function clamp(x: number, min: number, max: number): number {
-  if (x < min) return min;
+  if (Number.isNaN(x) || x < min) return min;
   if (x > max) return max;
   return x;
 }
@@ -29,18 +29,6 @@ function softEase(edge0: number, edge1: number, x: number, linearWeight = 0.48):
   const t = clamp01((x - edge0) / (edge1 - edge0));
   const smooth = t * t * (3 - 2 * t);
   return lerp(smooth, t, linearWeight);
-}
-
-export function mapRange(
-  value: number,
-  inMin: number,
-  inMax: number,
-  outMin: number,
-  outMax: number,
-): number {
-  if (inMin === inMax) return outMin;
-  const t = clamp01((value - inMin) / (inMax - inMin));
-  return lerp(outMin, outMax, t);
 }
 
 export function computePhasedProgress(v: number): PhasedProgress {

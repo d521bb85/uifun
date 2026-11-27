@@ -7,11 +7,12 @@ import {
   isPointOnHead,
   stepSimState,
 } from "./botanyPhysics";
-import { computePhasedProgress, getPalette, lerp, rgbToCss } from "./colorAndCurves";
+import { clamp, computePhasedProgress, getPalette, lerp, rgbToCss } from "./colorAndCurves";
 import experimentMeta from "./index";
 import { renderSunflowerFrame } from "./renderFrame";
 import { SunflowerFader } from "./SunflowerFader";
 import SunflowerFaderDemo from "./SunflowerFaderDemo";
+import { releaseLeafSpriteCache } from "./sunflowerPainter";
 import {
   BLEED_X,
   BLEED_Y,
@@ -115,7 +116,7 @@ describe("SunflowerFader SSR & ui-sdk wiring", () => {
     expect(html).toContain("custom-fader");
   });
 
-  it("does not override host surface or inject a full-page paper backdrop", () => {
+  it("does not override host surface or inject a full-page paper backdrop", async () => {
     const html = renderToString(<SunflowerFaderDemo />);
     expect(html).not.toContain("bg-[#f6f4ef]");
     expect(html).not.toContain("fixed inset-0");
@@ -125,6 +126,19 @@ describe("SunflowerFader SSR & ui-sdk wiring", () => {
     expect(meta.title).toBe("Sunflower Fader");
     expect(meta.surface).toBeUndefined();
     expect(meta.tags).toContain("ui-sdk");
+    expect(typeof meta.load).toBe("function");
+    const loaded = await meta.load?.();
+    expect(loaded?.default).toBe(SunflowerFaderDemo);
+  });
+
+  it("handles NaN value and defaultValue safely without emitting NaN into markup", () => {
+    expect(clamp(Number.NaN, 0, 100)).toBe(0);
+    const controlledHtml = renderToString(<SunflowerFader value={Number.NaN} />);
+    const uncontrolledHtml = renderToString(<SunflowerFader defaultValue={Number.NaN} />);
+    expect(controlledHtml).not.toContain("NaN");
+    expect(controlledHtml).toContain(">0%</output>");
+    expect(uncontrolledHtml).not.toContain("NaN");
+    expect(uncontrolledHtml).toContain(">0%</output>");
   });
 });
 
@@ -719,6 +733,12 @@ describe("renderSunflowerFrame mobile GPU budget", () => {
       expect(counters.fills + counters.strokes).toBeLessThan(120);
       // Only card/bottom/stem/outside-shadow clips on idle (0 per-leaf complex clips)
       expect(counters.clips).toBeLessThanOrEqual(6);
+
+      // Releasing leaf sprite cache on unmount resets buffers and re-bakes cleanly on remount
+      releaseLeafSpriteCache(sim);
+      renderSunflowerFrame(main.ctx as unknown as CanvasRenderingContext2D, sim, 2);
+      expect(counters.shadowBlurDraws).toBe(0);
+      expect(counters.multiplyDraws).toBe(0);
     } finally {
       (globalThis as unknown as { document: unknown }).document = prevDocument;
       (globalThis as unknown as { Path2D: unknown }).Path2D = prevPath2D;

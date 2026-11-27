@@ -2,13 +2,10 @@ import { mulberry32 } from "./colorAndCurves";
 import { CARD_HEIGHT, CARD_WIDTH } from "./types";
 
 export interface PaperTextures {
-  paperTile: HTMLCanvasElement;
-  pencilHatchTile: HTMLCanvasElement;
   pastelGrainTile: HTMLCanvasElement;
   pencilHatchOverlay: HTMLCanvasElement;
   pastelGrainOverlay: HTMLCanvasElement;
   skyPencilTexture: HTMLCanvasElement;
-  cardFinishTexture: HTMLCanvasElement;
   cardFinishOverlay: HTMLCanvasElement;
 }
 
@@ -398,13 +395,10 @@ export function getPaperTextures(): PaperTextures {
   if (typeof document === "undefined") {
     const stub = {} as HTMLCanvasElement;
     return {
-      paperTile: stub,
-      pencilHatchTile: stub,
       pastelGrainTile: stub,
       pencilHatchOverlay: stub,
       pastelGrainOverlay: stub,
       skyPencilTexture: stub,
-      cardFinishTexture: stub,
       cardFinishOverlay: stub,
     };
   }
@@ -424,14 +418,19 @@ export function getPaperTextures(): PaperTextures {
   );
   const cardFinishOverlay = createSourceOverOverlay(cardFinishTexture);
 
+  // Release intermediate bake canvases so mobile browsers don't retain unused GPU surfaces.
+  paperTile.width = 0;
+  paperTile.height = 0;
+  pencilHatchTile.width = 0;
+  pencilHatchTile.height = 0;
+  cardFinishTexture.width = 0;
+  cardFinishTexture.height = 0;
+
   cachedTextures = {
-    paperTile,
-    pencilHatchTile,
     pastelGrainTile,
     pencilHatchOverlay,
     pastelGrainOverlay,
     skyPencilTexture,
-    cardFinishTexture,
     cardFinishOverlay,
   };
 

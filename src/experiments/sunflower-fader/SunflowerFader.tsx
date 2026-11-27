@@ -29,6 +29,7 @@ import {
 } from "./botanyPhysics";
 import { clamp } from "./colorAndCurves";
 import { renderSunflowerFrame } from "./renderFrame";
+import { releaseLeafSpriteCache } from "./sunflowerPainter";
 import {
   BLEED_X,
   BLEED_Y,
@@ -59,6 +60,7 @@ const formatPercent = (v: number) => `${Math.round(v)}%`;
 
 const MODIFIER_KEYS = new Set(["Shift", "Control", "Alt", "Meta"]);
 const DRAG_ACTIVATION_PX = 6;
+const WHEEL_COMMIT_DELAY_MS = 160;
 
 const CARD_FRAME_STYLE: CSSProperties = {
   width: `min(${CARD_WIDTH}px, max(120px, calc((100dvh - 132px) * ${CARD_WIDTH / CARD_HEIGHT})), calc(100vw - 104px))`,
@@ -128,6 +130,13 @@ export function SunflowerFader({
   if (!simRef.current) {
     simRef.current = createInitialSimState(initialValue);
   }
+  const initialSim = simRef.current;
+  const [initialHeadDx] = useState(
+    () => `${Math.round(getHeadNormalizedCardPos(initialSim.head).xPct - 50)}%`,
+  );
+
+  const isControlledRef = useRef(isControlled);
+  isControlledRef.current = isControlled;
 
   const targetValueRef = useRef(initialValue);
   if (controlledValue !== undefined) {
@@ -137,14 +146,19 @@ export function SunflowerFader({
   const animateLoopRef = useRef(animateLoop);
   animateLoopRef.current = animateLoop;
 
+  const onValueCommitRef = useRef(onValueCommit);
+  onValueCommitRef.current = onValueCommit;
+
   const pointerCanvasRef = useRef<Point2D | null>(null);
   const pressOriginClientRef = useRef<Point2D | null>(null);
+  const activePointerIdRef = useRef<number | null>(null);
   const hasDraggedRef = useRef(false);
   const hoverHeadRef = useRef(false);
   const reducedMotionRef = useRef(false);
   const wheelAccumRef = useRef(0);
+  const wheelCommitTimerRef = useRef<number | null>(null);
   const lastModalityRef = useRef<"keyboard" | "pointer">("pointer");
-  const lastHeadDxRef = useRef<string | null>(null);
+  const lastHeadDxRef = useRef<string | null>(initialHeadDx);
 
   const syncHeadOffset = useCallback((sim: SunflowerSimState) => {
     const frameEl = frameRef.current;
@@ -208,6 +222,9 @@ export function SunflowerFader({
     };
     const onWindowPointerMove = (event: globalThis.PointerEvent) => {
       if (!controlRef.current?.hasAttribute("data-dragging")) return;
+      if (activePointerIdRef.current !== null && event.pointerId !== activePointerIdRef.current) {
+        return;
+      }
       const origin = pressOriginClientRef.current;
       if (origin && !hasDraggedRef.current) {
         const dx = event.clientX - origin.x;
@@ -232,10 +249,17 @@ export function SunflowerFader({
     const clearCachedRect = () => {
       canvasRectRef.current = null;
     };
-    const onWindowPointerEnd = (event: globalThis.PointerEvent) => {
+    const resetDragRefs = () => {
       canvasRectRef.current = null;
       pressOriginClientRef.current = null;
+      activePointerIdRef.current = null;
       hasDraggedRef.current = false;
+    };
+    const onWindowPointerEnd = (event: globalThis.PointerEvent) => {
+      if (activePointerIdRef.current !== null && event.pointerId !== activePointerIdRef.current) {
+        return;
+      }
+      resetDragRefs();
       if (event.pointerType === "touch") {
         pointerCanvasRef.current = null;
         if (hoverHeadRef.current) {
@@ -260,21 +284,31 @@ export function SunflowerFader({
         }
       }
     };
+    const onWindowBlur = () => {
+      resetDragRefs();
+      pointerCanvasRef.current = null;
+      if (hoverHeadRef.current) {
+        hoverHeadRef.current = false;
+        setHoveringHead(false);
+      }
+    };
     window.addEventListener("keydown", onWindowKeyDown, true);
     window.addEventListener("pointerdown", onWindowPointerDown, true);
     window.addEventListener("pointermove", onWindowPointerMove, true);
     window.addEventListener("pointerup", onWindowPointerEnd, true);
     window.addEventListener("pointercancel", onWindowPointerEnd, true);
+    window.addEventListener("blur", onWindowBlur);
     window.addEventListener("resize", clearCachedRect, { passive: true });
-    window.addEventListener("scroll", clearCachedRect, { passive: true });
+    window.addEventListener("scroll", clearCachedRect, { passive: true, capture: true });
     return () => {
       window.removeEventListener("keydown", onWindowKeyDown, true);
       window.removeEventListener("pointerdown", onWindowPointerDown, true);
       window.removeEventListener("pointermove", onWindowPointerMove, true);
       window.removeEventListener("pointerup", onWindowPointerEnd, true);
       window.removeEventListener("pointercancel", onWindowPointerEnd, true);
+      window.removeEventListener("blur", onWindowBlur);
       window.removeEventListener("resize", clearCachedRect);
-      window.removeEventListener("scroll", clearCachedRect);
+      window.removeEventListener("scroll", clearCachedRect, true);
     };
   }, []);
 
@@ -345,14 +379,43 @@ export function SunflowerFader({
     }
   }, [controlledValue, hoveringHead, animateLoop, paintSettledValue]);
 
+  useEffect(() => {
+    if (!disabled) return;
+    pointerCanvasRef.current = null;
+    if (hoverHeadRef.current) {
+      hoverHeadRef.current = false;
+      setHoveringHead(false);
+    }
+  }, [disabled]);
+
+  // Release canvas GPU surfaces on unmount so mobile WebKit doesn't retain detached buffers.
+  useEffect(() => {
+    return () => {
+      if (wheelCommitTimerRef.current !== null) {
+        window.clearTimeout(wheelCommitTimerRef.current);
+        wheelCommitTimerRef.current = null;
+      }
+      const canvas = canvasRef.current;
+      if (canvas) {
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+      ctxRef.current = null;
+      if (simRef.current) {
+        releaseLeafSpriteCache(simRef.current);
+      }
+    };
+  }, []);
+
   // Native non-passive wheel listener so preventDefault stops page scroll only over the card.
   useEffect(() => {
     const frameEl = frameRef.current;
     if (!frameEl) return;
 
     const handleWheel = (event: WheelEvent) => {
-      if (disabled || readOnly) return;
-      if (Math.abs(event.deltaY) < 0.01) return;
+      if (disabled || readOnly || controlRef.current?.hasAttribute("data-disabled")) return;
+      if (event.ctrlKey || event.metaKey) return;
+      if (Math.abs(event.deltaY) < 0.01 || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
       event.preventDefault();
 
       const raw =
@@ -373,7 +436,20 @@ export function SunflowerFader({
         wheelAccumRef.current = 0;
         return;
       }
-      controller.setValue(next, { event });
+      const accepted = controller.setValue(next, { event });
+      if (accepted) {
+        if (wheelCommitTimerRef.current !== null) {
+          window.clearTimeout(wheelCommitTimerRef.current);
+        }
+        wheelCommitTimerRef.current = window.setTimeout(() => {
+          wheelCommitTimerRef.current = null;
+          onValueCommitRef.current?.(next, {
+            reason: "imperative",
+            source: "mouse",
+            thumb: 0,
+          });
+        }, WHEEL_COMMIT_DELAY_MS);
+      }
     };
 
     frameEl.addEventListener("wheel", handleWheel, { passive: false });
@@ -383,7 +459,7 @@ export function SunflowerFader({
   const handleValueChange = useCallback(
     (next: number, details: SliderValueChangeDetails) => {
       onValueChange?.(next, details);
-      if (details.canceled) {
+      if (details.canceled || isControlledRef.current) {
         return;
       }
       targetValueRef.current = next;
@@ -394,27 +470,31 @@ export function SunflowerFader({
     [onValueChange, paintSettledValue],
   );
 
-  const handlePointerMove = useCallback((event: PointerEvent<HTMLDivElement>) => {
-    if (event.pointerType === "touch") return;
-    if (controlRef.current?.hasAttribute("data-dragging")) return;
+  const handlePointerMove = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      if (event.pointerType === "touch") return;
+      if (disabled || controlRef.current?.hasAttribute("data-disabled")) return;
+      if (controlRef.current?.hasAttribute("data-dragging")) return;
 
-    const canvas = canvasRef.current;
-    const sim = simRef.current;
-    if (!canvas || !sim) return;
+      const canvas = canvasRef.current;
+      const sim = simRef.current;
+      if (!canvas || !sim) return;
 
-    const rect = canvas.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
 
-    const canvasX = ((event.clientX - rect.left) / rect.width) * CANVAS_WIDTH;
-    const canvasY = ((event.clientY - rect.top) / rect.height) * CANVAS_HEIGHT;
-    pointerCanvasRef.current = { x: canvasX, y: canvasY };
+      const canvasX = ((event.clientX - rect.left) / rect.width) * CANVAS_WIDTH;
+      const canvasY = ((event.clientY - rect.top) / rect.height) * CANVAS_HEIGHT;
+      pointerCanvasRef.current = { x: canvasX, y: canvasY };
 
-    const onHead = isPointOnHead(canvasX, canvasY, sim.head, 10);
-    if (onHead !== hoverHeadRef.current) {
-      hoverHeadRef.current = onHead;
-      setHoveringHead(onHead);
-    }
-  }, []);
+      const onHead = isPointOnHead(canvasX, canvasY, sim.head, 10);
+      if (onHead !== hoverHeadRef.current) {
+        hoverHeadRef.current = onHead;
+        setHoveringHead(onHead);
+      }
+    },
+    [disabled],
+  );
 
   const handlePointerLeave = useCallback(() => {
     if (!controlRef.current?.hasAttribute("data-dragging")) {
@@ -428,15 +508,30 @@ export function SunflowerFader({
 
   const handleScaleTickClick = useCallback(
     (tickValue: number, event: MouseEvent<HTMLButtonElement>) => {
-      if (disabled || readOnly) return;
+      if (disabled || readOnly || controlRef.current?.hasAttribute("data-disabled")) return;
       lastModalityRef.current = "pointer";
       setKeyboardFocus(false);
-      controller.setValue(tickValue, { reason: "track-press", event: event.nativeEvent });
+      const accepted = controller.setValue(tickValue, {
+        reason: "track-press",
+        event: event.nativeEvent,
+      });
+      if (accepted) {
+        const nativeEvent = event.nativeEvent;
+        const pointerType =
+          typeof globalThis.PointerEvent === "function" &&
+          nativeEvent instanceof globalThis.PointerEvent
+            ? nativeEvent.pointerType
+            : "mouse";
+        const source = pointerType === "touch" ? "touch" : pointerType === "pen" ? "pen" : "mouse";
+        onValueCommitRef.current?.(tickValue, {
+          reason: "track-press",
+          source,
+          thumb: 0,
+        });
+      }
     },
     [controller, disabled, readOnly],
   );
-
-  const initialHeadDx = `${(getHeadNormalizedCardPos(simRef.current.head).xPct - 50).toFixed(2)}%`;
 
   return (
     <Slider<number>
@@ -456,7 +551,7 @@ export function SunflowerFader({
       disabled={disabled}
       readOnly={readOnly}
       className={cn(
-        "inline-flex w-auto min-w-0 flex-col items-center gap-4 select-none",
+        "group/slider inline-flex w-auto min-w-0 flex-col items-center gap-4 select-none",
         className,
       )}
     >
@@ -474,7 +569,7 @@ export function SunflowerFader({
           aria-hidden="true"
           data-slot="scale"
           className={cn(
-            "absolute right-[calc(100%+14px)] w-7 touch-manipulation [-webkit-tap-highlight-color:transparent]",
+            "absolute right-[calc(100%+14px)] w-7 touch-manipulation [-webkit-tap-highlight-color:transparent] group-data-disabled/slider:opacity-45",
             disabled && "opacity-45",
           )}
           style={SLIDER_TRACK_BOUNDS_STYLE}
@@ -523,8 +618,11 @@ export function SunflowerFader({
           ref={controlRef}
           data-focus-keyboard={keyboardFocus ? "" : undefined}
           onPointerDown={(event) => {
+            if (event.pointerType === "mouse" && event.button !== 0) return;
+            if (activePointerIdRef.current !== null) return;
             lastModalityRef.current = "pointer";
             setKeyboardFocus(false);
+            activePointerIdRef.current = event.pointerId;
             pressOriginClientRef.current = { x: event.clientX, y: event.clientY };
             hasDraggedRef.current = false;
             const canvas = canvasRef.current;

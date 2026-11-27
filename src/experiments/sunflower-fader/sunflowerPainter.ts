@@ -908,6 +908,18 @@ interface LeafSpriteEntry {
 
 const leafCacheByState = new WeakMap<SunflowerSimState, Map<number, LeafSpriteEntry>>();
 
+export function releaseLeafSpriteCache(state: SunflowerSimState): void {
+  const map = leafCacheByState.get(state);
+  if (!map) return;
+  for (const entry of map.values()) {
+    entry.canvas.width = 0;
+    entry.canvas.height = 0;
+    entry.baked = false;
+  }
+  map.clear();
+  leafCacheByState.delete(state);
+}
+
 function getLeafSpriteEntry(state: SunflowerSimState, leafId: number): LeafSpriteEntry | null {
   if (typeof document === "undefined") return null;
   let map = leafCacheByState.get(state);

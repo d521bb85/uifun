@@ -45,6 +45,11 @@ function getCardShadowCanvas(dpr: number, paperBgCss: string): HTMLCanvasElement
   if (cachedCardShadow && cachedCardShadow.dpr === dpr) {
     return cachedCardShadow.canvas;
   }
+  if (cachedCardShadow) {
+    cachedCardShadow.canvas.width = 0;
+    cachedCardShadow.canvas.height = 0;
+    cachedCardShadow = null;
+  }
   const w = CARD_WIDTH + SHADOW_PAD * 2;
   const h = CARD_HEIGHT + SHADOW_PAD * 2;
   const canvas = document.createElement("canvas");
