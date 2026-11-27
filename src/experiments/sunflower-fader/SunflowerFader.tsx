@@ -94,7 +94,7 @@ const SCALE_TICKS: readonly { value: number; tier: ScaleTickTier }[] = Array.fro
 
 export function SunflowerFader({
   value,
-  defaultValue = 68,
+  defaultValue = 75,
   onValueChange,
   onValueCommit,
   label = "Sunflower bloom",

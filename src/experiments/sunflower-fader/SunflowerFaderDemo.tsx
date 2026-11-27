@@ -1,5 +1,5 @@
 import { SunflowerFader } from "./SunflowerFader";
 
 export default function SunflowerFaderDemo() {
-  return <SunflowerFader defaultValue={68} />;
+  return <SunflowerFader defaultValue={75} />;
 }

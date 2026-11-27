@@ -25,7 +25,17 @@ import {
 } from "./types";
 
 const STEM_SEGMENTS = 48;
-const BEZIER_ARC_SAMPLES = 96;
+const STEM_TURGOR_POWER = 6.8;
+const STEM_TURGOR_GAIN = (HEAD_CARD_Y_MIN - HEAD_CARD_Y_MAX) / STEM_TURGOR_POWER;
+const STEM_WILTED_LENGTH = CARD_HEIGHT + 4 - (HEAD_CARD_Y_MAX + 14) - STEM_TURGOR_GAIN;
+const STEM_BEND_RATE = 3.2;
+const STEM_BEND_EXP_DENOM = 1 - Math.exp(-STEM_BEND_RATE);
+const STEM_MAX_BEND_U = 1.4;
+const STEM_MID_T = Float64Array.from(
+  { length: STEM_SEGMENTS },
+  (_, i) => (i + 0.5) / STEM_SEGMENTS,
+);
+const STEM_MID_SIN_PI = Float64Array.from(STEM_MID_T, (t) => Math.sin(Math.PI * t));
 const LEAF_COUNT = 10;
 
 interface LeafBlueprint {
@@ -359,7 +369,6 @@ interface InsectFlightPlan {
 
 interface InternalState {
   rng: () => number;
-  arcLengths: Float64Array;
   nextInsectKind: "bee" | "butterfly";
   insectPlan: InsectFlightPlan | null;
   leafWavePhase: number;
@@ -369,6 +378,7 @@ interface InternalState {
   dragGrabOffsetY: number;
   overdragY: number;
   dragSwayX: number;
+  neutralHeadX: number;
 }
 
 const internalMap = new WeakMap<SunflowerSimState, InternalState>();
@@ -376,7 +386,6 @@ const internalMap = new WeakMap<SunflowerSimState, InternalState>();
 function createInternalState(): InternalState {
   return {
     rng: mulberry32(847293),
-    arcLengths: new Float64Array(BEZIER_ARC_SAMPLES + 1),
     nextInsectKind: "bee",
     insectPlan: null,
     leafWavePhase: 0,
@@ -386,6 +395,7 @@ function createInternalState(): InternalState {
     dragGrabOffsetY: 0,
     overdragY: 0,
     dragSwayX: 0,
+    neutralHeadX: BLEED_X + CARD_WIDTH * 0.5,
   };
 }
 
@@ -625,9 +635,62 @@ function evalCubic(p0: number, p1: number, p2: number, p3: number, u: number): n
   return m * m * m * p0 + 3 * m * m * u * p1 + 3 * m * u * u * p2 + u * u * u * p3;
 }
 
-function evalCubicDeriv(p0: number, p1: number, p2: number, p3: number, u: number): number {
-  const m = 1 - u;
-  return 3 * m * m * (p1 - p0) + 6 * m * u * (p2 - p1) + 3 * u * u * (p3 - p2);
+interface RodBendParams {
+  tipAngle: number;
+  bendCenter: number;
+  bendHalfW: number;
+  lowBow: number;
+}
+
+function getRodBendParams(u: number): RodBendParams {
+  const uPos = Math.max(0, u);
+  const tipAngle = Math.min(
+    Math.PI,
+    (Math.PI * (1 - Math.exp(-STEM_BEND_RATE * uPos))) / STEM_BEND_EXP_DENOM,
+  );
+  const bendCenter = lerp(0.84, 0.645, Math.min(uPos, STEM_MAX_BEND_U) ** 0.78);
+  const bendHalfW = lerp(0.19, 0.155, smoothstep(0, 0.9, uPos));
+  const lowBow = -0.32 * Math.sin(tipAngle * 0.6);
+  return { tipAngle, bendCenter, bendHalfW, lowBow };
+}
+
+function evalStemAngle(t: number, sinPiT: number, params: RodBendParams): number {
+  const s = smoothstep(
+    params.bendCenter - params.bendHalfW,
+    params.bendCenter + params.bendHalfW,
+    t,
+  );
+  return params.lowBow * sinPiT * (1 - 0.55 * s) + params.tipAngle * s;
+}
+
+function evalRodTipDy(u: number, stemLength: number): number {
+  const params = getRodBendParams(u);
+  const ds = stemLength / STEM_SEGMENTS;
+  let dy = 0;
+  for (let i = 0; i < STEM_SEGMENTS; i++) {
+    const tMid = STEM_MID_T[i] ?? 0.5;
+    const sinPiT = STEM_MID_SIN_PI[i] ?? 1;
+    dy -= Math.cos(evalStemAngle(tMid, sinPiT, params)) * ds;
+  }
+  return dy;
+}
+
+function solveStemBendParam(targetNeckY: number, p0y: number, stemLength: number): number {
+  const desiredDy = targetNeckY - p0y;
+  if (-stemLength >= desiredDy) {
+    return 0;
+  }
+  let lo = 0;
+  let hi = STEM_MAX_BEND_U;
+  for (let iter = 0; iter < 20; iter++) {
+    const mid = (lo + hi) * 0.5;
+    if (evalRodTipDy(mid, stemLength) < desiredDy) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return (lo + hi) * 0.5;
 }
 
 function buildStemAndPose(
@@ -637,7 +700,6 @@ function buildStemAndPose(
 ): void {
   const { phases, wind } = state;
   const v = phases.raw;
-  const uncurl = phases.stemUncurl;
   const grow = phases.stemGrow;
   const headLift = phases.headLift;
   const vitality = clamp01(phases.warmth * 0.38 + grow * 0.62);
@@ -646,118 +708,79 @@ function buildStemAndPose(
   // plus subtle rubber-band stretch when overdragging past 0% or 100%
   const breathY = reducedMotion ? 0 : Math.sin(state.time * 0.72) * 1.2;
   const headCardY = lerp(HEAD_CARD_Y_MIN, HEAD_CARD_Y_MAX, v) + breathY + internal.overdragY;
-
-  // Smooth horizontal glide from 0.64 (drooping right of stem base) -> 0.50 (centered upright)
-  // plus gentle horizontal sway following the pointer during drag
-  const swayX = reducedMotion ? 0 : wind * lerp(1.8, 2.8, v);
-  const headCardX = lerp(0.64, 0.5, uncurl) * CARD_WIDTH + swayX + internal.dragSwayX;
-
-  const headCenterX = BLEED_X + headCardX;
   const headCenterY = BLEED_Y + headCardY;
 
   // 2. Head faces straight down into the ground at low values (-1.56 rad), lifting smoothly to face the user (0 rad)
-  let gazeYaw = 0;
-  let gazePitch = 0;
-  if (!reducedMotion && state.pointerCanvas && state.hoverHead && !state.dragging) {
-    const dx = clamp((state.pointerCanvas.x - headCenterX) / 120, -1, 1);
-    const dy = clamp((state.pointerCanvas.y - headCenterY) / 120, -1, 1);
-    const gazeWeight = 0.08 * lerp(0.15, 1.0, headLift);
-    gazeYaw = dx * gazeWeight;
-    gazePitch = -dy * gazeWeight * 0.55;
-  }
-
   const gentleNod = reducedMotion ? 0 : Math.sin(state.time * 0.82 + 0.5) * 0.014;
   const pitchLift = smoothstep(0.1, 0.98, headLift) * 0.72 + headLift * 0.28;
-  const pitch = clamp(
-    lerp(-1.56, 0, pitchLift) + gentleNod * lerp(0.25, 1, headLift) + gazePitch,
+  const basePitch = clamp(
+    lerp(-1.56, 0, pitchLift) + gentleNod * lerp(0.25, 1, headLift),
     -1.56,
     0.16,
   );
-  const dragYaw = clamp(internal.dragSwayX * 0.011, -0.16, 0.16) * headLift;
-  const yaw = clamp(gazeYaw + dragYaw + (reducedMotion ? 0 : wind * 0.025 * headLift), -0.35, 0.35);
 
   const bloomFactor = clamp01(phases.bloom * 0.78 + headLift * 0.22);
   const headRadius = lerp(35, 74, bloomFactor);
   const diskRadius = lerp(20, 35, clamp01(phases.bloom * 0.68 + headLift * 0.32));
 
-  // 3. Exact neck attachment point so the stem connects seamlessly straight into the top of the hanging bell at 0%
-  const cupBackY = -diskRadius * 0.92 * Math.sin(Math.max(0, -pitch));
+  // 3. Exact neck vertical attachment offset so the stem connects seamlessly into the calyx bell
+  const cupBackY = -diskRadius * 0.92 * Math.sin(Math.max(0, -basePitch));
   const uprightNeckBlend = smoothstep(0.55, 0.98, headLift);
   const neckOffX = -Math.sin(smoothstep(0.12, 0.96, headLift) * Math.PI) * 4.0;
   const neckOffY = lerp(cupBackY, 14, uprightNeckBlend);
-
-  const neckX = headCenterX + neckOffX;
   const neckY = headCenterY + neckOffY;
 
-  // 4. 48-segment Cubic Bezier stem spine anchored directly from stem base (P0) to head.neck (P3)
-  const baseCardX = lerp(0.36, 0.5, grow);
-  const p0x = BLEED_X + baseCardX * CARD_WIDTH;
+  // 4. Progressive botanical bending rod anchored at a fixed center root in the meadow.
+  // Dragging down bends the stalk gracefully from the upper neck into a shepherd's crook,
+  // with monotonic turgor settling near 100% and constant arc length through the lower half.
+  const p0x = BLEED_X + CARD_WIDTH * 0.5;
   const p0y = BLEED_Y + CARD_HEIGHT + 4;
-  const p3x = neckX;
-  const p3y = neckY;
 
-  // Lower control point P1: rises straight up on the left for the crook, eases into a poised stalk
-  const uprightP1Y = p0y - (p0y - p3y) * 0.34;
-  const p1x = p0x + lerp(3.0, -2.2, uncurl) + swayX * 0.35;
-  const p1y = lerp(BLEED_Y + 180, uprightP1Y, uncurl);
+  const windSwayX = reducedMotion ? 0 : wind * lerp(1.8, 2.8, v);
+  const totalSwayX = windSwayX + internal.dragSwayX;
 
-  // Upper control point P2: smoothly rotates around P3 from directly above (shepherd's crook at 0%)
-  // through upper-left (graceful nod at 50%) to directly below (upright stalk at 100%)
-  const entryAngle = uncurl ** 1.15 * Math.PI;
-  const rx2 = 38;
-  const ry2 = lerp(206, 138, uncurl);
-  const p2x = p3x - Math.sin(entryAngle) * rx2 + lerp(0, 1.8, uncurl) + swayX * 0.25;
-  const p2y = p3y - Math.cos(entryAngle) * ry2;
+  // Monotonic turgor length matched C1-smoothly to the vertical drop rate at 100%
+  // (dL/dv = HEAD_CARD_Y_MIN - HEAD_CARD_Y_MAX at v = 1), eliminating any sqrt(1 - v) snap
+  // between 98% and 100%, while holding constant ~381px across the lower half (zero re-stretching).
+  // Subtract breathY so gentle idle vertical breathing floats the stalk without buckling it at 100%.
+  const baseStemLength = STEM_WILTED_LENGTH + STEM_TURGOR_GAIN * v ** STEM_TURGOR_POWER - breathY;
+  const stemLength = Math.max(baseStemLength, p0y - neckY);
 
-  // Build cumulative arc-length table so stem nodes & leaf placements space evenly along the curve
-  const arcLengths = internal.arcLengths;
-  arcLengths[0] = 0;
-  let prevX = p0x;
-  let prevY = p0y;
-  let accum = 0;
-  for (let s = 1; s <= BEZIER_ARC_SAMPLES; s++) {
-    const u = s / BEZIER_ARC_SAMPLES;
-    const bx = evalCubic(p0x, p1x, p2x, p3x, u);
-    const by = evalCubic(p0y, p1y, p2y, p3y, u);
-    accum += Math.hypot(bx - prevX, by - prevY);
-    arcLengths[s] = accum;
-    prevX = bx;
-    prevY = by;
-  }
-  const totalArcLen = accum > 0.001 ? accum : 1;
+  // Solve bend purely on the zero-sway rod so dy(u) is strictly monotonic everywhere;
+  // lateral wind & drag sway are applied as a smooth cantilever flex afterward so pulling
+  // up-left can never make the bisection oscillate.
+  const bendU = solveStemBendParam(neckY, p0y, stemLength);
+  const bendParams = getRodBendParams(bendU);
 
   const stem: StemNode[] = state.stem;
   const baseRad = lerp(3.9, 5.4, vitality);
   const tipRad = lerp(1.8, 3.1, vitality);
+  const ds = stemLength / STEM_SEGMENTS;
+  const swayPow = 1.45;
 
-  let sampleIdx = 0;
+  let baseCurX = p0x;
+  let curY = p0y;
   for (let i = 0; i <= STEM_SEGMENTS; i++) {
     const t = i / STEM_SEGMENTS;
-    let u: number;
-    if (i === 0) {
-      u = 0;
-    } else if (i === STEM_SEGMENTS) {
-      u = 1;
-    } else {
-      const targetLen = t * totalArcLen;
-      while (sampleIdx < BEZIER_ARC_SAMPLES - 1 && (arcLengths[sampleIdx + 1] ?? 0) < targetLen) {
-        sampleIdx++;
-      }
-      const len0 = arcLengths[sampleIdx] ?? 0;
-      const len1 = arcLengths[sampleIdx + 1] ?? totalArcLen;
-      const segSpan = len1 - len0;
-      const frac = segSpan > 1e-6 ? (targetLen - len0) / segSpan : 0;
-      u = (sampleIdx + clamp01(frac)) / BEZIER_ARC_SAMPLES;
+    if (i > 0) {
+      const tMid = STEM_MID_T[i - 1] ?? (i - 0.5) / STEM_SEGMENTS;
+      const sinPiMid = STEM_MID_SIN_PI[i - 1] ?? Math.sin(Math.PI * tMid);
+      const thMid = evalStemAngle(tMid, sinPiMid, bendParams);
+      baseCurX += Math.sin(thMid) * ds;
+      curY -= Math.cos(thMid) * ds;
     }
 
-    const x = i === STEM_SEGMENTS ? p3x : evalCubic(p0x, p1x, p2x, p3x, u);
-    const y = i === STEM_SEGMENTS ? p3y : evalCubic(p0y, p1y, p2y, p3y, u);
+    const swayOffset = totalSwayX * t ** swayPow;
+    const x = baseCurX + swayOffset;
+    const y = i === STEM_SEGMENTS ? neckY : curY;
 
-    const dx = evalCubicDeriv(p0x, p1x, p2x, p3x, u);
-    const dy = evalCubicDeriv(p0y, p1y, p2y, p3y, u);
-    const dLen = Math.hypot(dx, dy) || 1;
-    const tx = dx / dLen;
-    const ty = dy / dLen;
+    const th = evalStemAngle(t, Math.sin(Math.PI * t), bendParams);
+    const swaySlope = t > 0 ? totalSwayX * swayPow * t ** (swayPow - 1) : 0;
+    const rawTx = stemLength * Math.sin(th) + swaySlope;
+    const rawTy = -stemLength * Math.cos(th);
+    const tLen = Math.hypot(rawTx, rawTy) || 1;
+    const tx = rawTx / tLen;
+    const ty = rawTy / tLen;
     const radius = lerp(baseRad, tipRad, t ** 0.82);
 
     const node = stem[i];
@@ -772,6 +795,25 @@ function buildStemAndPose(
       stem.push({ x, y, tx, ty, radius, t });
     }
   }
+
+  internal.neutralHeadX = baseCurX + windSwayX - neckOffX;
+  const neckX = baseCurX + totalSwayX;
+  const headCenterX = neckX - neckOffX;
+
+  // Subtle hover gaze toward the pointer once headCenterX is known
+  let gazeYaw = 0;
+  let gazePitch = 0;
+  if (!reducedMotion && state.pointerCanvas && state.hoverHead && !state.dragging) {
+    const dx = clamp((state.pointerCanvas.x - headCenterX) / 120, -1, 1);
+    const dy = clamp((state.pointerCanvas.y - headCenterY) / 120, -1, 1);
+    const gazeWeight = 0.08 * lerp(0.15, 1.0, headLift);
+    gazeYaw = dx * gazeWeight;
+    gazePitch = -dy * gazeWeight * 0.55;
+  }
+
+  const pitch = clamp(basePitch + gazePitch, -1.56, 0.16);
+  const dragYaw = clamp(internal.dragSwayX * 0.011, -0.16, 0.16) * headLift;
+  const yaw = clamp(gazeYaw + dragYaw + (reducedMotion ? 0 : wind * 0.025 * headLift), -0.35, 0.35);
 
   // Gentle roll following calm stem poise & slow breeze
   const neckNode = stem[STEM_SEGMENTS];
@@ -1606,7 +1648,7 @@ export function stepSimState(state: SunflowerSimState, dtRaw: number, input: Sim
       targetOverY = 12 * (pull / (pull + 64));
     }
 
-    const neutralX = BLEED_X + lerp(0.64, 0.5, state.phases.stemUncurl) * CARD_WIDTH;
+    const neutralX = internal.neutralHeadX;
     const effX = input.pointerCanvas.x - internal.dragGrabOffsetX;
     const dx = effX - neutralX;
     targetDragX = Math.sign(dx) * 15 * (Math.abs(dx) / (Math.abs(dx) + 75));

@@ -35,9 +35,9 @@ describe("SunflowerFader SSR & ui-sdk wiring", () => {
     expect(html).toContain('role="slider"');
     expect(html).toContain('type="range"');
     expect(html).toContain('aria-orientation="vertical"');
-    expect(html).toContain('aria-valuetext="68%"');
+    expect(html).toContain('aria-valuetext="75%"');
     expect(html).toContain('data-slot="slider-value"');
-    expect(html).toContain(">68%</output>");
+    expect(html).toContain(">75%</output>");
     expect(html).toContain("text-muted");
     expect(html).toContain("data-[focus-keyboard]:outline-muted");
     expect(html).not.toContain("has-[:focus-visible]:outline-muted");
@@ -118,7 +118,7 @@ describe("SunflowerFader SSR & ui-sdk wiring", () => {
     const html = renderToString(<SunflowerFaderDemo />);
     expect(html).not.toContain("bg-[#f6f4ef]");
     expect(html).not.toContain("fixed inset-0");
-    expect(html).toContain(">68%</output>");
+    expect(html).toContain(">75%</output>");
 
     const meta: ExperimentDefinition = experimentMeta;
     expect(meta.title).toBe("Sunflower Fader");
@@ -454,5 +454,93 @@ describe("botanyPhysics", () => {
     });
     const widthSpread = Math.max(...midNormWidths) - Math.min(...midNormWidths);
     expect(widthSpread).toBeGreaterThan(0.3);
+  });
+
+  it("bends smoothly without compressing and re-stretching past the midpoint", () => {
+    const samplePercents = [100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0];
+    const lengths: number[] = [];
+    const apexYs: number[] = [];
+    const rootXs: number[] = [];
+
+    for (const percent of samplePercents) {
+      const sim = createInitialSimState(percent);
+      let arcLen = 0;
+      let minY = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < sim.stem.length; i++) {
+        const node = sim.stem[i];
+        if (!node) continue;
+        if (node.y < minY) minY = node.y;
+        if (i > 0) {
+          const prev = sim.stem[i - 1];
+          if (prev) {
+            arcLen += Math.hypot(node.x - prev.x, node.y - prev.y);
+          }
+        }
+      }
+      lengths.push(arcLen);
+      apexYs.push(minY);
+      rootXs.push(sim.stem[0]?.x ?? 0);
+
+      // Tip of stem must always stay attached to head.neck
+      const tip = sim.stem[sim.stem.length - 1];
+      expect(tip).toBeDefined();
+      expect(tip?.x ?? 0).toBeCloseTo(sim.head.neck.x, 2);
+      expect(tip?.y ?? 0).toBeCloseTo(sim.head.neck.y, 2);
+    }
+
+    // Stem length must be monotonically non-increasing as value drops (never re-stretching downward)
+    for (let i = 1; i < lengths.length; i++) {
+      expect(lengths[i] ?? 0).toBeLessThanOrEqual((lengths[i - 1] ?? 0) + 0.5);
+    }
+
+    // Lower half (50% down to 0%) holds constant arc length as the crook deepens
+    const lowerHalf = lengths.slice(5);
+    expect(Math.max(...lowerHalf) - Math.min(...lowerHalf)).toBeLessThan(1.5);
+
+    // Stem apex lowers smoothly and monotonically from 100% down to 0%
+    for (let i = 1; i < apexYs.length; i++) {
+      expect(apexYs[i] ?? 0).toBeGreaterThanOrEqual((apexYs[i - 1] ?? 0) - 0.1);
+    }
+
+    // Root stays planted in one spot in the soil
+    const rootSpread = Math.max(...rootXs) - Math.min(...rootXs);
+    expect(rootSpread).toBeLessThan(0.01);
+
+    // Smooth entry near 100%: 100% -> 99% step must not spike sharply relative to 98% -> 97%
+    const at100 = createInitialSimState(100);
+    const at99 = createInitialSimState(99);
+    const at98 = createInitialSimState(98);
+    const at97 = createInitialSimState(97);
+    const tipAngle = (s: ReturnType<typeof createInitialSimState>) => {
+      const tip = s.stem[s.stem.length - 1];
+      return tip ? Math.atan2(tip.tx, -tip.ty) : 0;
+    };
+    const stepTop = Math.abs(tipAngle(at99) - tipAngle(at100));
+    const stepNext = Math.abs(tipAngle(at97) - tipAngle(at98));
+    expect(stepTop).toBeLessThan(stepNext * 1.15);
+    expect(Math.abs(at99.head.center.x - at100.head.center.x)).toBeLessThan(1.6);
+  });
+
+  it("stays smooth without stem jitter when dragging up and to the left at 100%", () => {
+    const sim = createInitialSimState(100);
+    let prevMidX = sim.stem[24]?.x ?? 0;
+    let maxSteadyJump = 0;
+
+    for (let i = 0; i < 90; i++) {
+      stepSimState(sim, 1 / 60, {
+        targetValue: 100,
+        dragging: true,
+        hoverHead: false,
+        pointerCanvas: { x: BLEED_X + 10, y: BLEED_Y + 20 },
+        reducedMotion: false,
+      });
+      const midX = sim.stem[24]?.x ?? 0;
+      if (i >= 20) {
+        maxSteadyJump = Math.max(maxSteadyJump, Math.abs(midX - prevMidX));
+      }
+      prevMidX = midX;
+    }
+
+    expect(maxSteadyJump).toBeLessThan(0.25);
   });
 });
